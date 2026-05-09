@@ -1,0 +1,51 @@
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - QUEUE_BACKEND=rq
+      - REDIS_URL=redis://redis:6379/0
+      - OUTPUTS_DIR=/app/outputs
+    volumes:
+      - ./outputs:/app/outputs
+    depends_on:
+      - redis
+
+  worker:
+    build: ./backend
+    command: python -m app.worker_runner
+    env_file:
+      - .env
+    environment:
+      - QUEUE_BACKEND=rq
+      - REDIS_URL=redis://redis:6379/0
+      - OUTPUTS_DIR=/app/outputs
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=https://api.deepseek.com
+      - OPENAI_MODEL=deepseek-chat
+      - SPEC_PARSER_MODE=auto
+    volumes:
+      - ./outputs:/app/outputs
+    depends_on:
+      - redis
+
+  frontend:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend

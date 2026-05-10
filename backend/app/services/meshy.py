@@ -5,10 +5,12 @@ import errno
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib import error, request
 
 from app.config import MESHY_AI_MODEL, MESHY_API_KEY, MESHY_HTTP_RETRIES, MESHY_HTTP_TIMEOUT_SECONDS
+from app.services.jobs import CancelledGeneration
 
 logger = logging.getLogger("object-first-mvp")
 
@@ -48,12 +50,19 @@ def _retryable_meshy_url_error(exc: error.URLError) -> bool:
     return False
 
 
-def _meshy_http_read(req: request.Request, *, context: str) -> bytes:
+def _meshy_http_read(
+    req: request.Request,
+    *,
+    context: str,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> bytes:
     """GET/POST with retries for transient network errors and retryable HTTP status codes."""
     attempts = max(1, 1 + max(0, MESHY_HTTP_RETRIES))
     backoff_s = 2.0
     timeout = float(MESHY_HTTP_TIMEOUT_SECONDS)
     for attempt in range(attempts):
+        if is_cancelled is not None and is_cancelled():
+            raise CancelledGeneration("Meshy request aborted (cancel requested).")
         try:
             with request.urlopen(req, timeout=timeout) as response:
                 return response.read()
@@ -67,6 +76,8 @@ def _meshy_http_read(req: request.Request, *, context: str) -> bytes:
                     attempts,
                     code,
                 )
+                if is_cancelled is not None and is_cancelled():
+                    raise CancelledGeneration("Meshy request aborted (cancel requested).")
                 time.sleep(backoff_s)
                 backoff_s = min(backoff_s * 2.0, 60.0)
                 continue
@@ -84,6 +95,8 @@ def _meshy_http_read(req: request.Request, *, context: str) -> bytes:
                     attempts,
                     exc.reason,
                 )
+                if is_cancelled is not None and is_cancelled():
+                    raise CancelledGeneration("Meshy request aborted (cancel requested).")
                 time.sleep(backoff_s)
                 backoff_s = min(backoff_s * 2.0, 60.0)
                 continue
@@ -127,7 +140,12 @@ def _as_data_uri_png(path: Path) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-def create_image_to_3d_task(*, image_path: Path, target_formats: list[str]) -> str:
+def create_image_to_3d_task(
+    *,
+    image_path: Path,
+    target_formats: list[str],
+    is_cancelled: Callable[[], bool] | None = None,
+) -> str:
     _require_key()
     url = "https://api.meshy.ai/openapi/v1/image-to-3d"
     payload = {
@@ -148,8 +166,10 @@ def create_image_to_3d_task(*, image_path: Path, target_formats: list[str]) -> s
         method="POST",
     )
     try:
-        raw = _meshy_http_read(req, context="create task")
+        raw = _meshy_http_read(req, context="create task", is_cancelled=is_cancelled)
         body = json.loads(raw.decode("utf-8"))
+    except CancelledGeneration:
+        raise
     except MeshyError:
         raise
     except json.JSONDecodeError as exc:
@@ -161,7 +181,7 @@ def create_image_to_3d_task(*, image_path: Path, target_formats: list[str]) -> s
     return str(task_id)
 
 
-def get_task(task_id: str) -> dict:
+def get_task(task_id: str, *, is_cancelled: Callable[[], bool] | None = None) -> dict:
     _require_key()
     url = f"https://api.meshy.ai/openapi/v1/image-to-3d/{task_id}"
     req = request.Request(
@@ -169,19 +189,27 @@ def get_task(task_id: str) -> dict:
         headers={"Authorization": f"Bearer {MESHY_API_KEY}"},
         method="GET",
     )
-    raw = _meshy_http_read(req, context="task status")
+    raw = _meshy_http_read(req, context="task status", is_cancelled=is_cancelled)
     try:
         return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise MeshyError(f"Meshy task status returned invalid JSON: {exc}") from exc
 
 
-def wait_for_task(task_id: str, *, timeout_seconds: int = 900, poll_seconds: float = 3.0) -> dict:
+def wait_for_task(
+    task_id: str,
+    *,
+    timeout_seconds: int = 900,
+    poll_seconds: float = 3.0,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict:
     t0 = time.time()
     last_log = t0
 
     while True:
-        task = get_task(task_id)
+        if is_cancelled is not None and is_cancelled():
+            raise CancelledGeneration("Meshy image-to-3d stopped (cancel requested).")
+        task = get_task(task_id, is_cancelled=is_cancelled)
         status = str(task.get("status", "")).upper()
         if status in {"SUCCEEDED", "FAILED", "CANCELED"}:
             return task
@@ -198,22 +226,30 @@ def wait_for_task(task_id: str, *, timeout_seconds: int = 900, poll_seconds: flo
                 int(now - t0),
             )
             last_log = now
+        if is_cancelled is not None and is_cancelled():
+            raise CancelledGeneration("Meshy image-to-3d stopped (cancel requested).")
         time.sleep(poll_seconds)
 
 
-def download_to(url: str, path: Path) -> None:
+def download_to(url: str, path: Path, *, is_cancelled: Callable[[], bool] | None = None) -> None:
     req = request.Request(url, method="GET")
-    path.write_bytes(_meshy_http_read(req, context="asset download"))
+    path.write_bytes(_meshy_http_read(req, context="asset download", is_cancelled=is_cancelled))
 
 
-def run_image_to_3d(*, image_path: Path, output_dir: Path, target_formats: list[str] | None = None) -> dict[str, Path]:
+def run_image_to_3d(
+    *,
+    image_path: Path,
+    output_dir: Path,
+    target_formats: list[str] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Path]:
     """
     Runs Meshy image->3D and writes selected formats under output_dir (see _MESHY_OUTPUT_FILENAMES),
     plus preview.png when Meshy returns thumbnail_url.
     """
     formats = normalize_meshy_target_formats(target_formats)
-    task_id = create_image_to_3d_task(image_path=image_path, target_formats=formats)
-    task = wait_for_task(task_id)
+    task_id = create_image_to_3d_task(image_path=image_path, target_formats=formats, is_cancelled=is_cancelled)
+    task = wait_for_task(task_id, is_cancelled=is_cancelled)
     status = str(task.get("status", "")).upper()
     if status != "SUCCEEDED":
         message = ((task.get("task_error") or {}) or {}).get("message") or "unknown error"
@@ -224,24 +260,30 @@ def run_image_to_3d(*, image_path: Path, output_dir: Path, target_formats: list[
     out: dict[str, Path] = {}
 
     for fmt in formats:
+        if is_cancelled is not None and is_cancelled():
+            raise CancelledGeneration("Meshy downloads stopped (cancel requested).")
         file_url = model_urls.get(fmt)
         if not file_url:
             raise MeshyError(f"Meshy task succeeded but no {fmt.upper()} url was returned.")
         fname = _MESHY_OUTPUT_FILENAMES[fmt]
         dest = output_dir / fname
-        download_to(file_url, dest)
+        download_to(file_url, dest, is_cancelled=is_cancelled)
         out[fmt] = dest
 
     if "obj" in formats:
         mtl_url = model_urls.get("mtl")
         if mtl_url:
+            if is_cancelled is not None and is_cancelled():
+                raise CancelledGeneration("Meshy downloads stopped (cancel requested).")
             mtl_path = output_dir / "meshy_model.mtl"
-            download_to(mtl_url, mtl_path)
+            download_to(mtl_url, mtl_path, is_cancelled=is_cancelled)
             out["mtl"] = mtl_path
 
     preview_path = output_dir / "preview.png"
     if thumb_url:
-        download_to(thumb_url, preview_path)
+        if is_cancelled is not None and is_cancelled():
+            raise CancelledGeneration("Meshy downloads stopped (cancel requested).")
+        download_to(thumb_url, preview_path, is_cancelled=is_cancelled)
         out["preview"] = preview_path
     return out
 

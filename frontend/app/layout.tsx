@@ -34,6 +34,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${poppins.variable} ${lora.variable} ${plexMono.variable}`}>
+      <head>
+        <link rel="preconnect" href="https://cdn.prod.website-files.com" crossOrigin="anonymous" />
+      </head>
       <body>
         {children}
         <Script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js" />

@@ -10,6 +10,8 @@ export type MainTabId = "home" | "company";
 export type WorkspaceSessionV1 = {
   v: 1;
   activeJobId: string | null;
+  /** In-flight runs kept in the background while another prototype is focused (parallel runs). */
+  sidecarJobIds: string[];
   historyJobIds: string[];
   prompt: string;
   company: string;
@@ -27,6 +29,7 @@ export type WorkspaceSessionV1 = {
 const DEFAULT_SESSION: WorkspaceSessionV1 = {
   v: 1,
   activeJobId: null,
+  sidecarJobIds: [],
   historyJobIds: [],
   prompt: "",
   company: "",
@@ -48,10 +51,14 @@ export function readWorkspaceSession(): WorkspaceSessionV1 | null {
     const mainTab: MainTabId =
       parsed.mainTab === "company" || parsed.mainTab === "home" ? parsed.mainTab : "home";
     const pipelineMinimized = parsed.pipelineMinimized === true;
+    const sidecarJobIds = Array.isArray(parsed.sidecarJobIds)
+      ? parsed.sidecarJobIds.filter((id): id is string => typeof id === "string")
+      : [];
     return {
       ...DEFAULT_SESSION,
       ...parsed,
       companyContextText: typeof parsed.companyContextText === "string" ? parsed.companyContextText : "",
+      sidecarJobIds,
       historyJobIds: Array.isArray(parsed.historyJobIds)
         ? parsed.historyJobIds.filter((id): id is string => typeof id === "string")
         : [],

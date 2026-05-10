@@ -5,8 +5,6 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { AddAssetsBlock, type AddAssetKind, type AddAssetsHandle } from "@/components/AddAssetsBlock";
 import { PortfolioSection } from "@/components/PortfolioSection";
 import type { JobPayload } from "@/lib/api";
-import { isTerminalJobStatus } from "@/lib/flow";
-
 function ToolPillChevron() {
   return (
     <span className="homeLanding__toolPillChevron" aria-hidden>
@@ -33,10 +31,20 @@ type HomeLandingProps = {
   onIdeaAssetsReadyChange: (ready: boolean) => void;
   onSubmit: () => void;
   onOpenPortfolioJob: (job: JobPayload) => void;
+  onDeletePortfolioJob: (job: JobPayload) => void;
   addAssetsRef?: RefObject<AddAssetsHandle | null>;
-  /** Active pipeline job while the user is on the home composer (run continues in the background). */
-  backgroundJob?: JobPayload | null;
-  onResumePipeline?: () => void;
+  /** In-progress runs shown on Home while you compose or start another prototype. */
+  backgroundJobs?: JobPayload[];
+  onResumePipeline?: (job: JobPayload) => void;
+  /** When the pipeline is minimized, show research + confirm under Your 3D models only. */
+  imagePreviewJob?: JobPayload | null;
+  researchSummaryDraft?: string;
+  onChangeResearchSummaryDraft?: (value: string) => void;
+  onConfirmImagePreview?: () => void;
+  onSaveResearchSummaryPreview?: () => void;
+  imagePreviewBusy?: boolean;
+  researchPreviewSaveBusy?: boolean;
+  researchSummaryDirty?: boolean;
 };
 
 export function HomeLanding({
@@ -55,12 +63,20 @@ export function HomeLanding({
   onIdeaAssetsReadyChange,
   onSubmit,
   onOpenPortfolioJob,
+  onDeletePortfolioJob,
   addAssetsRef,
-  backgroundJob,
+  backgroundJobs = [],
   onResumePipeline,
+  imagePreviewJob = null,
+  researchSummaryDraft = "",
+  onChangeResearchSummaryDraft,
+  onConfirmImagePreview,
+  onSaveResearchSummaryPreview,
+  imagePreviewBusy = false,
+  researchPreviewSaveBusy = false,
+  researchSummaryDirty = false,
 }: HomeLandingProps) {
-  const pipelineBlocksNewGenerate = Boolean(backgroundJob && !isTerminalJobStatus(backgroundJob.status));
-  const generateLocked = isSubmitting || !ideaAssetsReady || pipelineBlocksNewGenerate;
+  const generateLocked = isSubmitting || !ideaAssetsReady;
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addWrapRef = useRef<HTMLDivElement | null>(null);
@@ -231,14 +247,12 @@ export function HomeLanding({
             onClick={onSubmit}
             disabled={generateLocked}
             title={
-              pipelineBlocksNewGenerate
-                ? "Finish or open the pipeline run in progress before starting another prototype."
-                : !ideaAssetsReady
-                  ? "Wait until every added file is analyzed, or remove uploads that are still queued or failed."
-                  : undefined
+              !ideaAssetsReady
+                ? "Wait until every added file is analyzed, or remove uploads that are still queued or failed."
+                : undefined
             }
           >
-            {isSubmitting ? "Starting…" : pipelineBlocksNewGenerate ? "Pipeline running" : "Generate concept art"}
+            {isSubmitting ? "Starting…" : "Generate concept art"}
           </button>
         </div>
       </div>
@@ -246,8 +260,17 @@ export function HomeLanding({
       <PortfolioSection
         jobs={history}
         onOpenJob={onOpenPortfolioJob}
-        backgroundJob={backgroundJob ?? null}
+        onDeleteJob={onDeletePortfolioJob}
+        backgroundJobs={backgroundJobs}
         onResumePipeline={onResumePipeline}
+        imagePreviewJob={imagePreviewJob}
+        researchSummaryDraft={researchSummaryDraft}
+        onChangeResearchSummaryDraft={onChangeResearchSummaryDraft}
+        onConfirmImagePreview={onConfirmImagePreview}
+        onSaveResearchSummaryPreview={onSaveResearchSummaryPreview}
+        imagePreviewBusy={imagePreviewBusy}
+        researchPreviewSaveBusy={researchPreviewSaveBusy}
+        researchSummaryDirty={researchSummaryDirty}
       />
     </div>
   );

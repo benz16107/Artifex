@@ -47,6 +47,13 @@ ASSET_ANALYSIS_LLM_TIMEOUT_SECONDS = int(
 )
 ASSET_ANALYSIS_LLM_MAX_RETRIES = int(os.getenv("ASSET_ANALYSIS_LLM_MAX_RETRIES", "1"))
 
+# Brand research (Tavily + chat JSON) before reference images
+TAVILY_API_KEY = (os.getenv("TAVILY_API_KEY") or "").strip() or None
+RESEARCH_LLM_TIMEOUT_SECONDS = int(os.getenv("RESEARCH_LLM_TIMEOUT_SECONDS", "120"))
+RESEARCH_LLM_MAX_RETRIES = int(os.getenv("RESEARCH_LLM_MAX_RETRIES", "1"))
+RESEARCH_TAVILY_MAX_RESULTS = int(os.getenv("RESEARCH_TAVILY_MAX_RESULTS", "5"))
+RESEARCH_MAX_QUERIES = int(os.getenv("RESEARCH_MAX_QUERIES", "3"))
+
 # Concept pipeline: image reference + image->3D
 # Reference images use OpenAI Images: /v1/images/generations (typically api.openai.com).
 # Reuse OPENAI_API_KEY for images when you're on OpenAI (default) or an unknown host —

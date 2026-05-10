@@ -4,6 +4,7 @@ import base64
 import errno
 import json
 import logging
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -18,7 +19,15 @@ from app.config import (
     IMAGE_OPENAI_MODEL,
     OPENAI_BASE_URL,
 )
+from app.services.concept_review import style_front_filename, style_three_quarter_filename
+from app.services.jobs import CancelledGeneration
+
 logger = logging.getLogger("object-first-mvp")
+
+
+def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled is not None and is_cancelled():
+        raise CancelledGeneration("Reference image generation cancelled by user.")
 
 
 class ReferenceImageAPIError(Exception):
@@ -89,6 +98,7 @@ def _image_bytes_from_response_item(
     *,
     http_timeout: int,
     max_retries: int,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> bytes:
     b64 = item.get("b64_json")
     if b64:
@@ -102,6 +112,7 @@ def _image_bytes_from_response_item(
     attempts = max(1, 1 + max(0, max_retries))
     backoff_s = 2.0
     for attempt in range(attempts):
+        _raise_if_cancelled(is_cancelled)
         try:
             img_req = request.Request(img_url, method="GET")
             with request.urlopen(img_req, timeout=http_timeout) as response:
@@ -114,6 +125,7 @@ def _image_bytes_from_response_item(
                     attempts,
                     exc.reason,
                 )
+                _raise_if_cancelled(is_cancelled)
                 time.sleep(backoff_s)
                 backoff_s = min(backoff_s * 2.0, 60.0)
                 continue
@@ -145,6 +157,7 @@ def _post_openai_images_json(
     http_timeout: int,
     view_name: str,
     max_retries: int,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> dict:
     """
     POST JSON to /v1/images/generations or /v1/images/edits with retries.
@@ -153,6 +166,7 @@ def _post_openai_images_json(
     attempts = max(1, 1 + max(0, max_retries))
     backoff_s = 2.0
     for attempt in range(attempts):
+        _raise_if_cancelled(is_cancelled)
         try:
             req = request.Request(
                 url,
@@ -175,6 +189,7 @@ def _post_openai_images_json(
                     attempts,
                     code,
                 )
+                _raise_if_cancelled(is_cancelled)
                 time.sleep(backoff_s)
                 backoff_s = min(backoff_s * 2.0, 60.0)
                 continue
@@ -203,6 +218,7 @@ def _post_openai_images_json(
                     attempts,
                     exc.reason,
                 )
+                _raise_if_cancelled(is_cancelled)
                 time.sleep(backoff_s)
                 backoff_s = min(backoff_s * 2.0, 60.0)
                 continue
@@ -227,6 +243,8 @@ def _shared_reference_context(
     prompt: str,
     company: str | None,
     documents: list[str],
+    variation_detail_prompt: str | None = None,
+    research_digest: str | None = None,
 ) -> str:
     doc_blob = ""
     if documents:
@@ -269,7 +287,76 @@ def _shared_reference_context(
             f"Excerpts:\n{doc_blob}"
         )
 
+    if variation_detail_prompt:
+        extra = variation_detail_prompt.strip()[:1500]
+        if extra:
+            parts.append(
+                "ADDITIONAL DIRECTION FOR THIS CONCEPT VARIATION ONLY (the user added this after seeing earlier "
+                "concept options; it applies to this generation pass only): "
+                f"{extra} "
+                "Integrate these notes with all instructions above. Do not change the product category or core "
+                "product type from the main PRODUCT TO RENDER line—use this block for refinements to materials, "
+                "surface finish, proportions, color emphasis, graphics, labels, and studio presentation. If any "
+                "detail here conflicts with mandatory brand rules in excerpted documents above, follow those brand "
+                "rules for identity (colors, logos, clearspace, typography where specified)."
+            )
+
+    rd = (research_digest or "").strip()
+    if rd:
+        rd = rd[:2500]
+        parts.append(
+            "PUBLIC BRAND RESEARCH (synthesized from open-web sources; for orientation only). "
+            "If anything here conflicts with mandatory brand rules in the user's context documents above, "
+            "follow those documents for identity (colors, logos, typography, packaging rules). "
+            f"Research digest:\n{rd}"
+        )
+
     return " ".join(parts)
+
+
+def build_reference_image_prompt_preview(
+    *,
+    prompt: str,
+    company: str | None,
+    documents: list[str],
+    research_digest: str | None = None,
+    variation_detail_prompt: str | None = None,
+    openai_image_model: str,
+) -> dict[str, str | bool]:
+    """Exact strings sent to the image API (for user review before generation)."""
+    shared = _shared_reference_context(
+        prompt=prompt,
+        company=company,
+        documents=documents,
+        variation_detail_prompt=variation_detail_prompt,
+        research_digest=research_digest,
+    )
+    front_camera = (
+        "View role: canonical straight-on front reference photo of the product. "
+        "Camera: front elevation, object centered, eye level, neutral studio background, even soft lighting."
+    )
+    legacy_three_quarter_camera = (
+        "View role: same product as the front reference, rotated in space only — not a different product variant. "
+        "Camera: three-quarter view from front-right with a modest downward tilt. "
+        "Object centered, neutral studio background, same apparent scale and design as the front view."
+    )
+    gen_model = (openai_image_model or "").strip() or IMAGE_OPENAI_MODEL
+    edit_model = _three_quarter_edit_model(gen_model)
+    front_prompt = f"{shared} {front_camera}"
+    if edit_model:
+        three_quarter_prompt = _three_quarter_edit_prompt(shared)
+        three_quarter_mode = "image_edits_from_front_png"
+    else:
+        three_quarter_prompt = f"{shared} {legacy_three_quarter_camera}"
+        three_quarter_mode = "text_generation_fallback"
+    return {
+        "image_model": gen_model,
+        "three_quarter_mode": three_quarter_mode,
+        "three_quarter_edit_model": (edit_model or ""),
+        "shared_context": shared,
+        "front_prompt": front_prompt,
+        "three_quarter_prompt": three_quarter_prompt,
+    }
 
 
 def generate_reference_images(
@@ -280,9 +367,17 @@ def generate_reference_images(
     output_dir: Path,
     openai_image_model: str | None = None,
     after_front_saved: Callable[[], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    style_index: int = 0,
+    sync_canonical: bool = True,
+    variation_detail_prompt: str | None = None,
+    research_digest: str | None = None,
 ) -> dict[str, Path]:
     """
     Generates reference images under output_dir and returns view name -> path.
+
+    Writes style_{n}_front.png / style_{n}_three_quarter.png. When sync_canonical
+    is True, copies them onto reference_front.png / reference_three_quarter.png.
 
     Prompts use only the user's product description, optional company line, and
     context document excerpts (no structured product spec or inferred geometry).
@@ -304,6 +399,8 @@ def generate_reference_images(
         prompt=prompt,
         company=company,
         documents=documents,
+        variation_detail_prompt=variation_detail_prompt,
+        research_digest=research_digest,
     )
     front_camera = (
         "View role: canonical straight-on front reference photo of the product. "
@@ -322,8 +419,11 @@ def generate_reference_images(
     retries = CONCEPT_IMAGE_HTTP_RETRIES
 
     results: dict[str, Path] = {}
+    front_fname = style_front_filename(style_index)
+    tq_fname = style_three_quarter_filename(style_index)
 
-    logger.info("reference_image_begin view=front model=%s", gen_model)
+    _raise_if_cancelled(is_cancelled)
+    logger.info("reference_image_begin view=front model=%s style_index=%s", gen_model, style_index)
     front_prompt = f"{shared} {front_camera}"
     gen_payload: dict = {
         "model": gen_model,
@@ -339,23 +439,29 @@ def generate_reference_images(
         http_timeout=http_timeout,
         view_name="front",
         max_retries=retries,
+        is_cancelled=is_cancelled,
     )
     front_bytes = _image_bytes_from_response_item(
         body["data"][0],
         http_timeout=http_timeout,
         max_retries=retries,
+        is_cancelled=is_cancelled,
     )
-    front_path = output_dir / "reference_front.png"
+    front_path = output_dir / front_fname
     front_path.write_bytes(front_bytes)
     results["front"] = front_path
+    if sync_canonical:
+        shutil.copyfile(front_path, output_dir / "reference_front.png")
     if after_front_saved is not None:
         after_front_saved()
 
+    _raise_if_cancelled(is_cancelled)
     edit_model = _three_quarter_edit_model(gen_model)
     if edit_model:
         logger.info(
-            "reference_image_begin view=three_quarter model=%s mode=image_edits_from_front",
+            "reference_image_begin view=three_quarter model=%s mode=image_edits_from_front style_index=%s",
             edit_model,
+            style_index,
         )
         edit_payload: dict = {
             "model": edit_model,
@@ -375,13 +481,15 @@ def generate_reference_images(
             http_timeout=http_timeout,
             view_name="three_quarter",
             max_retries=retries,
+            is_cancelled=is_cancelled,
         )
         tq_bytes = _image_bytes_from_response_item(
             body_tq["data"][0],
             http_timeout=http_timeout,
             max_retries=retries,
+            is_cancelled=is_cancelled,
         )
-        tq_path = output_dir / "reference_three_quarter.png"
+        tq_path = output_dir / tq_fname
         tq_path.write_bytes(tq_bytes)
         results["three_quarter"] = tq_path
     else:
@@ -406,15 +514,20 @@ def generate_reference_images(
             http_timeout=http_timeout,
             view_name="three_quarter",
             max_retries=retries,
+            is_cancelled=is_cancelled,
         )
         tq_bytes = _image_bytes_from_response_item(
             body_tq["data"][0],
             http_timeout=http_timeout,
             max_retries=retries,
+            is_cancelled=is_cancelled,
         )
-        tq_path = output_dir / "reference_three_quarter.png"
+        tq_path = output_dir / tq_fname
         tq_path.write_bytes(tq_bytes)
         results["three_quarter"] = tq_path
+
+    if sync_canonical and "three_quarter" in results:
+        shutil.copyfile(results["three_quarter"], output_dir / "reference_three_quarter.png")
 
     return results
 

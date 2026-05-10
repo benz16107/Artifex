@@ -30,6 +30,10 @@ class StorageBackend(Protocol):
         """Public URLs for concept reference_* PNG files that exist under output_dir."""
         ...
 
+    def concept_style_slot_urls(self, job_id: str, output_dir: Path, style_index: int) -> dict[str, str]:
+        """Public URLs for style_{n}_front.png / style_{n}_three_quarter.png when present."""
+        ...
+
     def readiness(self) -> tuple[bool, str]:
         ...
 
@@ -64,6 +68,18 @@ class LocalStorage:
             path = output_dir / fname
             if path.exists():
                 out[view] = f"/outputs/{job_id}/{fname}"
+        return out
+
+    def concept_style_slot_urls(self, job_id: str, output_dir: Path, style_index: int) -> dict[str, str]:
+        from app.services.concept_review import style_front_filename, style_three_quarter_filename
+
+        out: dict[str, str] = {}
+        ff = style_front_filename(style_index)
+        tf = style_three_quarter_filename(style_index)
+        if (output_dir / ff).exists():
+            out["front"] = f"/outputs/{job_id}/{ff}"
+        if (output_dir / tf).exists():
+            out["three_quarter"] = f"/outputs/{job_id}/{tf}"
         return out
 
     def readiness(self) -> tuple[bool, str]:
@@ -117,6 +133,25 @@ class S3Storage:
             "three_quarter": "reference_three_quarter.png",
         }
         for view, filename in fname_by_view.items():
+            local_path = output_dir / filename
+            if not local_path.exists():
+                continue
+            object_key = f"{job_id}/{filename}"
+            self.client.upload_file(str(local_path), self.bucket, object_key)
+            if self.public_base_url:
+                urls[view] = f"{self.public_base_url.rstrip('/')}/{object_key}"
+            else:
+                urls[view] = f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{object_key}"
+        return urls
+
+    def concept_style_slot_urls(self, job_id: str, output_dir: Path, style_index: int) -> dict[str, str]:
+        from app.services.concept_review import style_front_filename, style_three_quarter_filename
+
+        urls: dict[str, str] = {}
+        for view, filename in (
+            ("front", style_front_filename(style_index)),
+            ("three_quarter", style_three_quarter_filename(style_index)),
+        ):
             local_path = output_dir / filename
             if not local_path.exists():
                 continue

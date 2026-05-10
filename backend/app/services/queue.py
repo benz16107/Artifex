@@ -6,6 +6,8 @@ from threading import Thread
 from app.config import QUEUE_BACKEND, REDIS_URL, RQ_QUEUE_NAME
 from app.services.jobs import read_job
 from app.services.worker import (
+    add_concept_style_job,
+    confirm_image_generation_job,
     continue_concept_job,
     process_job,
     regenerate_concept_references_job,
@@ -33,10 +35,24 @@ def enqueue_continue_concept(job_id: str) -> EnqueueResult:
     return EnqueueResult(backend="inline")
 
 
+def enqueue_confirm_image_generation(job_id: str) -> EnqueueResult:
+    if QUEUE_BACKEND == "rq":
+        return _enqueue_rq("app.services.worker.confirm_image_generation_job", job_id)
+    Thread(target=confirm_image_generation_job, args=(job_id,), daemon=True).start()
+    return EnqueueResult(backend="inline")
+
+
 def enqueue_regenerate_concept_references(job_id: str) -> EnqueueResult:
     if QUEUE_BACKEND == "rq":
         return _enqueue_rq("app.services.worker.regenerate_concept_references_job", job_id)
     Thread(target=regenerate_concept_references_job, args=(job_id,), daemon=True).start()
+    return EnqueueResult(backend="inline")
+
+
+def enqueue_add_concept_style(job_id: str, variation_detail_prompt: str | None = None) -> EnqueueResult:
+    if QUEUE_BACKEND == "rq":
+        return _enqueue_rq("app.services.worker.add_concept_style_job", job_id, variation_detail_prompt)
+    Thread(target=add_concept_style_job, args=(job_id, variation_detail_prompt), daemon=True).start()
     return EnqueueResult(backend="inline")
 
 

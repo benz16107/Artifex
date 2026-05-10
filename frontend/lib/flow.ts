@@ -15,6 +15,7 @@ export function getFlowStep(job: JobPayload | null): FlowStepId {
     return "references";
   }
   if (job.status === "awaiting_concept_confirmation") return "references";
+  if (job.status === "awaiting_image_generation_preview") return "references";
   if (job.status === "queued" || job.status === "running") {
     const gp = (job.generation_phase ?? "").toLowerCase();
     if (gp.includes("image_to_3d") || gp.includes("to_3d")) return "mesh";
@@ -24,6 +25,9 @@ export function getFlowStep(job: JobPayload | null): FlowStepId {
 }
 
 export function friendlyJobStatus(status: JobStatus): string {
+  if (status === "awaiting_image_generation_preview") {
+    return "Review research & image prompts";
+  }
   if (status === "awaiting_concept_confirmation") {
     return "Ready for your review";
   }
@@ -37,6 +41,8 @@ export function friendlyJobStatus(status: JobStatus): string {
 
 export function friendlyGenerationPhase(phase: string): string {
   switch (phase) {
+    case "brand_research":
+      return "Researching brand & category (web + your documents)";
     case "concept_reference_images":
       return "Generating reference images (often 1–6 min)";
     case "concept_image_to_3d":

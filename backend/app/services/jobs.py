@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import tempfile
 import time
 import uuid
@@ -15,6 +17,17 @@ except ImportError:
     fcntl = None  # Windows / minimal environments: no cross-process lock
 
 from app.config import JOB_METADATA_FILENAME, OUTPUTS_DIR
+
+
+class CancelledGeneration(Exception):
+    """Raised when the user cancels during long-running image or mesh work (cooperative abort)."""
+
+
+_JOB_ID_RE = re.compile(r"^job_[0-9a-f]{10}$")
+
+
+def is_safe_job_id(job_id: str) -> bool:
+    return bool(_JOB_ID_RE.match(job_id))
 
 
 def _utc_now() -> str:
@@ -57,6 +70,14 @@ def create_job(
         "cancel_requested": False,
         "generation_phase": None,
         "concept_references": None,
+        "concept_styles": None,
+        "selected_concept_style_index": 0,
+        "concept_generation_style_index": None,
+        "research_digest": None,
+        "research_sources": None,
+        "research_brief": None,
+        "research_warnings": [],
+        "image_generation_preview": None,
     }
     _write(path / JOB_METADATA_FILENAME, data)
     return data
@@ -86,15 +107,20 @@ def update_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any]:
 
 
 def request_cancel(job_id: str) -> dict[str, Any]:
-    current = read_job(job_id)
-    if current is None:
-        raise FileNotFoundError(f"Unknown job_id: {job_id}")
-    if current["status"] in {"completed", "failed", "cancelled"}:
+    """Serialize with workers so a cancel cannot be overwritten by a queued→running transition."""
+    with job_lock(job_id):
+        current = read_job(job_id)
+        if current is None:
+            raise FileNotFoundError(f"Unknown job_id: {job_id}")
+        if current["status"] in {"completed", "failed", "cancelled"}:
+            return current
+        updates: dict[str, Any] = {"cancel_requested": True}
+        if current["status"] in {"queued", "awaiting_concept_confirmation", "awaiting_image_generation_preview"}:
+            updates["status"] = "cancelled"
+        current.update(updates)
+        current["updated_at"] = _utc_now()
+        _write(_job_dir(job_id) / JOB_METADATA_FILENAME, current)
         return current
-    updates: dict[str, Any] = {"cancel_requested": True}
-    if current["status"] in {"queued", "awaiting_concept_confirmation"}:
-        updates["status"] = "cancelled"
-    return update_job(job_id, updates)
 
 
 def job_output_dir(job_id: str) -> Path:
@@ -124,3 +150,12 @@ def _write(path: Path, data: dict[str, Any]) -> None:
         temp_file.write(json.dumps(data, indent=2))
         temp_path = Path(temp_file.name)
     temp_path.replace(path)
+
+
+def delete_job_artifacts(job_id: str) -> None:
+    """Remove the job output directory and all artifacts (metadata, meshes, locks)."""
+    if not is_safe_job_id(job_id):
+        raise ValueError("Invalid job_id")
+    path = _job_dir(job_id)
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)

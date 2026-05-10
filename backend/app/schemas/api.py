@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.schemas.spec import ProductSpec
 from app.services.meshy import normalize_meshy_target_formats
@@ -11,6 +11,7 @@ from app.services.meshy import normalize_meshy_target_formats
 JobStatus = Literal[
     "queued",
     "running",
+    "awaiting_image_generation_preview",
     "awaiting_concept_confirmation",
     "completed",
     "failed",
@@ -26,6 +27,40 @@ class GenerateRequest(BaseModel):
     documents: list[str] = Field(default_factory=list, max_length=12)
     # When true, reference images use IMAGE_OPENAI_MODEL_FAST instead of IMAGE_OPENAI_MODEL.
     fast_reference_images: bool = False
+
+
+class ConceptStyleRow(BaseModel):
+    index: int = Field(ge=0)
+    front: str
+    three_quarter: str | None = None
+
+
+class SelectConceptStyleRequest(BaseModel):
+    style_index: int = Field(ge=0)
+
+
+class AddConceptStyleRequest(BaseModel):
+    """Optional extra instructions for one additional concept style generation."""
+
+    detail_prompt: str | None = Field(
+        default=None,
+        max_length=2000,
+        validation_alias=AliasChoices("detail_prompt", "detailPrompt"),
+    )
+
+    @field_validator("detail_prompt")
+    @classmethod
+    def _strip_detail_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class ConfirmImageGenerationRequest(BaseModel):
+    """Optional research text override before reference-image generation."""
+
+    research_digest: str | None = Field(default=None, max_length=8000)
 
 
 class ConfirmConceptRequest(BaseModel):
@@ -72,11 +107,17 @@ class JobResponse(BaseModel):
     user_id: str = "anonymous"
     status: JobStatus
     prompt: str
+    company: str | None = None
     fast_reference_images: bool = False
     # Concept pipeline sub-step (cleared when the job finishes).
     generation_phase: str | None = None
     # Populated when status is awaiting_concept_confirmation (view key -> URL path or absolute URL).
     concept_references: dict[str, str] | None = None
+    # Multiple concept styles (front + optional three-quarter URLs per index).
+    concept_styles: list[ConceptStyleRow] | None = None
+    selected_concept_style_index: int = 0
+    # While a style slot is being generated, the index of that slot (otherwise null).
+    concept_generation_style_index: int | None = None
     spec: ProductSpec | None = None
     files: FilesPayload = Field(default_factory=FilesPayload)
     error: ErrorPayload | None = None
@@ -88,6 +129,13 @@ class JobResponse(BaseModel):
     updated_at: str | None = None
     # Last Meshy export formats chosen at confirm (or regenerate-3d); not always present on older jobs.
     meshy_target_formats: list[str] | None = None
+    # Brand research + image prompt preview (after research, before reference images).
+    documents: list[str] = Field(default_factory=list)
+    research_digest: str | None = None
+    research_sources: list[dict[str, str]] | None = None
+    research_brief: dict[str, str] | None = None
+    research_warnings: list[str] = Field(default_factory=list)
+    image_generation_preview: dict[str, Any] | None = None
 
 
 class GenerateResponse(BaseModel):

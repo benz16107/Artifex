@@ -8,7 +8,14 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from pydantic import ValidationError
 
-from app.config import API_AUTH_TOKEN, DEFAULT_USER_ID, QUEUE_BACKEND, STORAGE_BACKEND
+from app.config import (
+    API_AUTH_TOKEN,
+    DEFAULT_USER_ID,
+    IMAGE_OPENAI_MODEL,
+    IMAGE_OPENAI_MODEL_FAST,
+    QUEUE_BACKEND,
+    STORAGE_BACKEND,
+)
 from app.services import composio_context
 from app.services.asset_analysis import (
     AssetAnalysisError,
@@ -18,15 +25,66 @@ from app.services.asset_analysis import (
     analyze_uploaded_assets,
 )
 from app.schemas.api import (
+    AddConceptStyleRequest,
     CancelJobResponse,
     ConfirmConceptRequest,
+    ConfirmImageGenerationRequest,
     GenerateRequest,
     GenerateResponse,
     JobResponse,
+    SelectConceptStyleRequest,
 )
-from app.services.jobs import create_job, job_output_dir, read_job, request_cancel, update_job
+from app.services.concept_review import (
+    build_concept_review_snapshot,
+    copy_style_to_canonical_reference,
+    list_concept_style_indices,
+)
+from app.services.jobs import (
+    create_job,
+    delete_job_artifacts,
+    is_safe_job_id,
+    job_lock,
+    job_output_dir,
+    read_job,
+    request_cancel,
+    update_job,
+)
+from app.services.reference_images import build_reference_image_prompt_preview
+
+
+def _apply_research_digest_to_image_preview(
+    job_id: str,
+    job: dict[str, Any],
+    *,
+    research_digest: str | None,
+) -> dict[str, Any]:
+    """Rebuild persisted image prompt preview from edited research text (no queue)."""
+    use_fast = bool(job.get("fast_reference_images"))
+    image_model = IMAGE_OPENAI_MODEL_FAST if use_fast else IMAGE_OPENAI_MODEL
+    preview = build_reference_image_prompt_preview(
+        prompt=job.get("prompt") or "",
+        company=job.get("company"),
+        documents=job.get("documents") or [],
+        research_digest=research_digest,
+        variation_detail_prompt=None,
+        openai_image_model=image_model,
+    )
+    return update_job(
+        job_id,
+        {
+            "research_digest": research_digest,
+            "research_brief": {
+                "brand_snapshot": "",
+                "visual_packaging_cues": "",
+                "category_competitive_notes": "",
+            },
+            "image_generation_preview": preview,
+        },
+    )
 from app.services.queue import (
     cancel_enqueued_job_if_possible,
+    enqueue_add_concept_style,
+    enqueue_confirm_image_generation,
     enqueue_continue_concept,
     enqueue_generate_prompt,
     enqueue_regenerate_concept_references,
@@ -117,6 +175,73 @@ def generate(request: HttpRequest) -> JsonResponse:
 
 @csrf_exempt
 @require_http_methods(["POST"])
+def confirm_image_generation(request: HttpRequest, job_id: str) -> JsonResponse:
+    """Resume reference-image generation after the user reviewed research + prompt preview."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "awaiting_image_generation_preview":
+        return _json_error("Job is not waiting for image-generation confirmation.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        confirm_image_payload = ConfirmImageGenerationRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+
+    if "research_digest" in body:
+        rd = (confirm_image_payload.research_digest or "").strip()
+        digest_value = rd or None
+        _apply_research_digest_to_image_preview(job_id, job, research_digest=digest_value)
+
+    enqueue_result = enqueue_confirm_image_generation(job_id)
+    update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
+    data = GenerateResponse(job_id=job_id, status="queued").model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def save_image_generation_preview(request: HttpRequest, job_id: str) -> JsonResponse:
+    """Rebuild image prompt preview from edited research text; stay on awaiting_image_generation_preview."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "awaiting_image_generation_preview":
+        return _json_error("Job is not waiting for image-generation confirmation.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        payload = ConfirmImageGenerationRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+    rd = (payload.research_digest or "").strip()
+    digest_value = rd or None
+    updated = _apply_research_digest_to_image_preview(job_id, job, research_digest=digest_value)
+    data = JobResponse.model_validate(updated).model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
 def confirm_concept(request: HttpRequest, job_id: str) -> JsonResponse:
     auth = _authenticate_or_response(request)
     if isinstance(auth, JsonResponse):
@@ -168,6 +293,92 @@ def regenerate_concept_references(request: HttpRequest, job_id: str) -> JsonResp
 
 @csrf_exempt
 @require_http_methods(["POST"])
+def add_concept_style(request: HttpRequest, job_id: str) -> JsonResponse:
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "awaiting_concept_confirmation":
+        return _json_error("Add concept style is only available while reference images are awaiting review.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        add_payload = AddConceptStyleRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+    # Persist before enqueue so the worker always sees the text (thread/RQ can start immediately).
+    update_job(job_id, {"pending_add_concept_style_detail": add_payload.detail_prompt})
+    enqueue_result = enqueue_add_concept_style(job_id, add_payload.detail_prompt)
+    update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
+    data = GenerateResponse(job_id=job_id, status="queued").model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def select_concept_style(request: HttpRequest, job_id: str) -> JsonResponse:
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "awaiting_concept_confirmation":
+        return _json_error("Pick a concept style only while reference images are awaiting review.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        payload = SelectConceptStyleRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+
+    output_dir = job_output_dir(job_id)
+    job_cur: dict[str, Any] = {}
+    try:
+        with job_lock(job_id):
+            job_locked = read_job(job_id)
+            if not job_locked or job_locked.get("status") != "awaiting_concept_confirmation":
+                return _json_error("Job is no longer awaiting concept review.", 409)
+            if payload.style_index not in list_concept_style_indices(output_dir):
+                return _json_error("That concept style is not available yet.", 400)
+            copy_style_to_canonical_reference(output_dir, payload.style_index)
+            update_job(job_id, {"selected_concept_style_index": payload.style_index})
+            job_cur = read_job(job_id) or {}
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+
+    storage = get_storage_backend()
+    snap = build_concept_review_snapshot(
+        storage,
+        job_id,
+        output_dir,
+        job_cur,
+        generation_style_index=None,
+    )
+    update_job(job_id, snap)
+    refreshed = read_job(job_id)
+    if not refreshed:
+        return _json_error("Job not found.", 404)
+    data = JobResponse.model_validate(refreshed).model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
 def regenerate_mesh(request: HttpRequest, job_id: str) -> JsonResponse:
     auth = _authenticate_or_response(request)
     if isinstance(auth, JsonResponse):
@@ -199,7 +410,6 @@ def regenerate_mesh(request: HttpRequest, job_id: str) -> JsonResponse:
     return JsonResponse(data, safe=False)
 
 
-@require_http_methods(["GET"])
 def get_job(request: HttpRequest, job_id: str) -> JsonResponse:
     auth = _authenticate_or_response(request)
     if isinstance(auth, JsonResponse):
@@ -213,6 +423,40 @@ def get_job(request: HttpRequest, job_id: str) -> JsonResponse:
         return _json_error("Forbidden: job owned by another user", 403)
     data = JobResponse.model_validate(job).model_dump(mode="json")
     return JsonResponse(data, safe=False)
+
+
+def delete_job(request: HttpRequest, job_id: str) -> JsonResponse:
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    if not is_safe_job_id(job_id):
+        return _json_error("Invalid job id.", 400)
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    cancel_enqueued_job_if_possible(job_id)
+    try:
+        request_cancel(job_id)
+    except FileNotFoundError:
+        pass
+    try:
+        delete_job_artifacts(job_id)
+    except ValueError:
+        return _json_error("Invalid job id.", 400)
+    return JsonResponse({"job_id": job_id, "deleted": True}, safe=False)
+
+
+@csrf_exempt
+def job_route(request: HttpRequest, job_id: str) -> JsonResponse:
+    if request.method == "GET":
+        return get_job(request, job_id)
+    if request.method == "DELETE":
+        return delete_job(request, job_id)
+    return JsonResponse({"detail": "Method not allowed"}, status=405)
 
 
 @csrf_exempt

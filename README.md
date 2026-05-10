@@ -2,6 +2,66 @@
 
 Artifex turns a short product idea into a **structured spec**, **brand research**, **reviewable concept reference images**, and—after you confirm—**image-to-3D meshes** (Meshy) plus supporting assets. A Next.js UI drives the flow; a Django API owns jobs, storage, and integrations.
 
+```mermaid
+flowchart TB
+  subgraph clients["Clients"]
+    FE["Next.js frontend"]
+    QV["Quest viewer (Unity)"]
+  end
+
+  subgraph django["Django API"]
+    EP["HTTP: /generate /jobs /assets/analyze /composio /health /ready …"]
+    FILES["GET /outputs/… /viewer/models"]
+  end
+
+  subgraph exec["Job execution"]
+    INLINE["Inline queue\n(default)"]
+    REDIS[(Redis)]
+    WORK["RQ worker\n(optional)"]
+  end
+
+  subgraph persist["Artifacts"]
+    DISK[(Local outputs or S3)]
+    CDN[(Cloudinary optional PNG CDN)]
+  end
+
+  subgraph third["Third-party platforms"]
+    OAI["OpenAI\n(chat/spec + reference images)"]
+    MESH["Meshy\n(image → 3D)"]
+    TAV["Tavily\n(brand research web search)"]
+    CMP["Composio\n(OAuth + tool execution)"]
+    SAAS["Drive · Notion · …\n(via Composio)"]
+    BB["Backboard\n(optional synthesis / RAG / asset analysis)"]
+  end
+
+  FE --> EP
+  FE --> FILES
+  QV --> FILES
+
+  EP --> INLINE
+  EP --> REDIS
+  REDIS --> WORK
+
+  EP --> CMP
+  CMP --> SAAS
+
+  INLINE --> OAI
+  INLINE --> TAV
+  INLINE --> MESH
+  INLINE --> BB
+  WORK --> OAI
+  WORK --> TAV
+  WORK --> MESH
+  WORK --> BB
+
+  EP --> DISK
+  INLINE --> DISK
+  WORK --> DISK
+  EP --> CDN
+  INLINE --> CDN
+  WORK --> CDN
+```
+
 Typical artifacts under `outputs/{job_id}/` include `spec.json`, concept PNGs, `reference_front.png`, optional `model.glb` / STL / OBJ (depending on requested formats), and `preview.png` when Meshy provides one.
 
 ## What’s in this repo

@@ -71,6 +71,9 @@ def _env_truthy(name: str, default: str = "0") -> bool:
     return (os.getenv(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Master: Artifex never calls Backboard unless this is 1 (default off so stray shell env cannot enable it alone).
+ARTIFEX_USE_BACKBOARD = _env_truthy("ARTIFEX_USE_BACKBOARD", "0")
+
 # Requires BACKBOARD_API_KEY: use Backboard for brand-research JSON synthesis instead of OpenAI chat completions.
 ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS = _env_truthy("ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS")
 # Requires ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS: skip Tavily and use Backboard web_search Auto on the synthesis call.

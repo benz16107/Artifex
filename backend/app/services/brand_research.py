@@ -15,6 +15,7 @@ from app.config import (
     ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY,
     ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS,
     ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS,
+    ARTIFEX_USE_BACKBOARD,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MODEL,
@@ -431,8 +432,10 @@ def run_brand_research(
     See .env.example for ARTIFEX_BACKBOARD_* and BACKBOARD_* options.
     """
     warnings: list[str] = []
-    backboard_syn = bool(ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and backboard.is_configured())
-    if ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and not backboard.is_configured():
+    backboard_syn = bool(
+        ARTIFEX_USE_BACKBOARD and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and backboard.is_configured()
+    )
+    if ARTIFEX_USE_BACKBOARD and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and not backboard.is_configured():
         warnings.append(
             "ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS is enabled but BACKBOARD_API_KEY is missing; using OpenAI for synthesis."
         )
@@ -443,14 +446,15 @@ def run_brand_research(
 
     if ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY and not backboard_syn:
         warnings.append(
-            "ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY requires BACKBOARD_API_KEY and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS; "
-            "Tavily path is used instead."
+            "ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY requires ARTIFEX_USE_BACKBOARD=1, BACKBOARD_API_KEY, and "
+            "ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS; Tavily path is used instead."
         )
         skip_tavily = False
 
     if ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS and not backboard_syn:
         warnings.append(
-            "ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS requires BACKBOARD_API_KEY and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS."
+            "ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS requires ARTIFEX_USE_BACKBOARD=1, BACKBOARD_API_KEY, and "
+            "ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS."
         )
 
     if skip_tavily:

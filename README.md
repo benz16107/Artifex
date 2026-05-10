@@ -194,7 +194,7 @@ Full variable list and comments live in [`.env.example`](.env.example). Highligh
 - **Storage:** `STORAGE_BACKEND=local|s3`; for S3 set `S3_BUCKET` and optional `S3_REGION` / `S3_PUBLIC_BASE_URL`.  
 - **CDN for PNGs:** Optional Cloudinary (`CLOUDINARY_*`); meshes and JSON still follow `STORAGE_BACKEND`.  
 - **Composio:** `COMPOSIO_API_KEY` and `COMPOSIO_ALLOWED_TOOLKITS` for pulling Google Drive, Notion, etc. into context documents.  
-- **Backboard:** Optional [Backboard](https://docs.backboard.io/) integration for research synthesis, web search, thread RAG, and asset analysis—see toggles in `.env.example`.  
+- **Backboard:** Optional [Backboard](https://docs.backboard.io/) integration—set `ARTIFEX_USE_BACKBOARD=1` plus `BACKBOARD_API_KEY` and the `ARTIFEX_BACKBOARD_*` toggles in `.env.example` (default is off).  
 
 ## Error codes
 

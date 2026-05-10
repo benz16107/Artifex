@@ -17,6 +17,7 @@ from urllib import error, request
 
 from app.config import (
     ARTIFEX_BACKBOARD_ASSET_ANALYSIS,
+    ARTIFEX_USE_BACKBOARD,
     ASSET_ANALYSIS_LLM_MAX_RETRIES,
     ASSET_ANALYSIS_LLM_TIMEOUT_SECONDS,
     OPENAI_API_KEY,
@@ -29,7 +30,7 @@ logger = logging.getLogger("object-first-mvp")
 
 
 def _backboard_assets_enabled() -> bool:
-    return bool(ARTIFEX_BACKBOARD_ASSET_ANALYSIS and backboard.is_configured())
+    return bool(ARTIFEX_USE_BACKBOARD and ARTIFEX_BACKBOARD_ASSET_ANALYSIS and backboard.is_configured())
 
 
 MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MB combined per request (no per-file cap)

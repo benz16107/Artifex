@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 rq
 redis
 composio>=0.7,<1
+cloudinary>=1.40.0,<2

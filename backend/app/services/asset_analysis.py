@@ -16,14 +16,20 @@ from typing import Any
 from urllib import error, request
 
 from app.config import (
+    ARTIFEX_BACKBOARD_ASSET_ANALYSIS,
     ASSET_ANALYSIS_LLM_MAX_RETRIES,
     ASSET_ANALYSIS_LLM_TIMEOUT_SECONDS,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MODEL,
 )
+from app.services import backboard
 
 logger = logging.getLogger("object-first-mvp")
+
+
+def _backboard_assets_enabled() -> bool:
+    return bool(ARTIFEX_BACKBOARD_ASSET_ANALYSIS and backboard.is_configured())
 
 
 MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MB combined per request (no per-file cap)
@@ -259,6 +265,40 @@ def _post_chat_completion(payload: dict) -> str:
     )
 
 
+def _safe_upload_basename(asset: UploadedAsset) -> str:
+    raw = (asset.filename or "upload").replace("\\", "/").split("/")[-1]
+    stem = raw.rsplit(".", 1)[0] if "." in raw else raw
+    cleaned = "".join(c for c in stem if c.isalnum() or c in ("-", "_"))[:80]
+    return cleaned or "upload"
+
+
+def _post_backboard_asset(
+    system: str,
+    user_text: str,
+    files: list[tuple[str, str, bytes]] | None,
+) -> str:
+    last_error: str | None = None
+    for attempt in range(max(1, ASSET_ANALYSIS_LLM_MAX_RETRIES + 1)):
+        try:
+            raw = backboard.send_message(
+                content=user_text,
+                system_prompt=system,
+                web_search="off",
+                json_output=False,
+                multipart_files=files,
+            )
+            return backboard.assistant_text(raw)
+        except backboard.BackboardError as exc:
+            last_error = str(exc)
+            if attempt < ASSET_ANALYSIS_LLM_MAX_RETRIES:
+                continue
+            break
+    raise AssetAnalysisError(
+        f"Could not analyze the file via Backboard ({last_error}).",
+        http_status=502,
+    )
+
+
 def _analyze_image(asset: UploadedAsset, mime: str, *, sketch: bool) -> str:
     if sketch:
         intro = (
@@ -273,6 +313,10 @@ def _analyze_image(asset: UploadedAsset, mime: str, *, sketch: bool) -> str:
             "Extract concept-art-relevant context per the system instructions."
         )
         system = _SYSTEM_PROMPT
+    if _backboard_assets_enabled():
+        ext = (mimetypes.guess_extension(mime) or ".png").lower()
+        fname = _safe_upload_basename(asset) + ext
+        return _post_backboard_asset(system, intro, [("files", fname, asset.data)])
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -295,13 +339,17 @@ def _analyze_image(asset: UploadedAsset, mime: str, *, sketch: bool) -> str:
 
 
 def _analyze_pdf(asset: UploadedAsset) -> str:
+    intro = (
+        f"Reference document: {asset.filename or 'document.pdf'}. "
+        "Extract concept-art-relevant context per the system instructions."
+    )
+    if _backboard_assets_enabled():
+        fname = _safe_upload_basename(asset) + ".pdf"
+        return _post_backboard_asset(_SYSTEM_PROMPT, intro, [("files", fname, asset.data)])
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": (
-                f"Reference document: {asset.filename or 'document.pdf'}. "
-                "Extract concept-art-relevant context per the system instructions."
-            ),
+            "text": intro,
         },
         {
             "type": "file",
@@ -328,6 +376,8 @@ def _analyze_text(asset: UploadedAsset, raw: str) -> str:
         f"Reference document: {asset.filename or 'document.txt'}.\n\n"
         f"Document text follows between <doc> tags:\n<doc>\n{body}\n</doc>"
     )
+    if _backboard_assets_enabled():
+        return _post_backboard_asset(_SYSTEM_PROMPT, user_content, None)
     payload = {
         "model": OPENAI_MODEL,
         "temperature": 0.2,

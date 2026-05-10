@@ -1,8 +1,14 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { useRef } from "react";
 
 import { outputUrl } from "@/lib/api";
+import { cloudinaryThumb } from "@/lib/cloudinaryDelivery";
+import { useSyncModelViewerHostPixelSize } from "@/lib/modelViewerHostPixelSize";
+
+/** Host element for `<model-viewer>`; pixel sizing avoids the default 300×150 canvas. */
+type ModelViewerHost = HTMLElement & { loaded?: boolean };
 
 type ModelViewerProps = {
   glbPath?: string;
@@ -24,14 +30,21 @@ export function ModelViewer({
   footer,
 }: ModelViewerProps) {
   const glbUrl = outputUrl(glbPath);
-  const previewUrl = outputUrl(previewPath);
+  const previewUrl = cloudinaryThumb(outputUrl(previewPath), 160);
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<ModelViewerHost | null>(null);
+
+  useSyncModelViewerHostPixelSize(frameRef, viewerRef, glbUrl ?? null);
 
   if (glbUrl) {
     return (
       <div className="stagePanel stagePanel--viewer">
-        <div className="modelViewerFrame">
+        <div className="modelViewerFrame" ref={frameRef}>
           {/* @ts-expect-error model-viewer is a custom element */}
           <model-viewer
+            ref={(el: ModelViewerHost | null) => {
+              viewerRef.current = el;
+            }}
             src={glbUrl}
             camera-controls
             auto-rotate

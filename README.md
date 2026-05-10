@@ -1,35 +1,56 @@
-# Object-First 3D Prototype Generator (MVP)
+# Artifex
 
-This MVP converts a text prompt into a product spec, generates concept reference images for review, then (after you confirm) runs Meshy image-to-3D. Typical outputs include:
+Artifex turns a short product idea into a **structured spec**, **brand research**, **reviewable concept reference images**, and—after you confirm—**image-to-3D meshes** (Meshy) plus supporting assets. A Next.js UI drives the flow; a Django API owns jobs, storage, and integrations.
 
-- `model.glb` (when selected)
-- `meshy_scan.stl`, `meshy_model.obj`, and other Meshy formats you request
-- `preview.png` (Meshy thumbnail when available)
-- `spec.json`
+Typical artifacts under `outputs/{job_id}/` include `spec.json`, concept PNGs, `reference_front.png`, optional `model.glb` / STL / OBJ (depending on requested formats), and `preview.png` when Meshy provides one.
+
+## What’s in this repo
+
+| Area | Role |
+|------|------|
+| [`backend/`](backend/) | Django API, job queue, Meshy/OpenAI/Tavily/Composio/Backboard wiring |
+| [`frontend/`](frontend/) | Next.js 14 app with `model-viewer` for in-browser GLB preview |
+| [`quest-viewer/`](quest-viewer/) | Optional Unity 6 Meta Quest client; see [`quest-viewer/README.md`](quest-viewer/README.md) |
 
 ## Stack
 
-- Backend: Django + Python
-- Frontend: Next.js + React + `model-viewer`
-- Storage: local filesystem (`outputs/{job_id}`)
+- **Backend:** Django 5, Pydantic, optional Redis + RQ for async work  
+- **Frontend:** Next.js 14, React 18, TypeScript  
+- **Artifacts:** Local disk by default (`outputs/`), optional S3; optional Cloudinary for PNG CDN URLs  
 
-## Run Backend
+## Prerequisites
+
+- Python 3.x (use a venv)  
+- Node.js 18+ for the frontend  
+- API keys as needed: see [`.env.example`](.env.example) (OpenAI for chat/spec; OpenAI image API for reference frames; Meshy for 3D; optional Tavily, Composio, Backboard, Cloudinary)  
+
+The backend loads **`.env` at the repository root** first, then optional `backend/.env` for any keys still unset ([`backend/app/config.py`](backend/app/config.py)).
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` before running workers or hitting paid APIs.
+
+## Run the backend
 
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python manage.py migrate --noinput
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Backend runs on [http://localhost:8000](http://localhost:8000).
+- App URLs are mounted at the server root (no `/api` prefix): e.g. `http://localhost:8000/health`  
+- Static downloads: `GET /outputs/{job_id}/{filename}`  
 
-### Optional Queue Worker (Redis/RQ)
+### Optional: Redis + RQ worker
 
-By default, jobs run inline in the API process (`QUEUE_BACKEND=inline`).
-To run generation in a separate worker process:
+Default: `QUEUE_BACKEND=inline` (work runs in the web process). For a separate worker:
+
+**Terminal A** (API with RQ):
 
 ```bash
 cd backend
@@ -37,7 +58,7 @@ source .venv/bin/activate
 QUEUE_BACKEND=rq REDIS_URL=redis://localhost:6379/0 python manage.py runserver 0.0.0.0:8000
 ```
 
-In another terminal:
+**Terminal B** (worker):
 
 ```bash
 cd backend
@@ -45,7 +66,7 @@ source .venv/bin/activate
 REDIS_URL=redis://localhost:6379/0 python -m app.worker_runner
 ```
 
-## Run Frontend
+## Run the frontend
 
 ```bash
 cd frontend
@@ -53,38 +74,72 @@ npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
-Frontend runs on [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000).
 
-Optional frontend auth headers:
+Optional headers when the API is locked down (`API_AUTH_TOKEN` on the server):
 
 ```bash
 NEXT_PUBLIC_API_TOKEN=<token>
 NEXT_PUBLIC_USER_ID=<user-id>
 ```
 
-## API
+The browser client sends `x-api-token` and `x-user-id` when these are set.
 
-- `POST /generate` -> create async generation job (reference images, then pause for confirmation)
-- `POST /jobs/{job_id}/confirm-concept` -> continue with Meshy exports
-- `POST /jobs/{job_id}/regenerate-concept` -> re-run reference images while awaiting review (same `spec.json`)
-- `POST /jobs/{job_id}/regenerate-3d` -> re-run Meshy from saved `reference_front.png` after `completed` or `failed` (JSON body optional: `target_formats`, same as confirm-concept)
-- `GET /jobs/{job_id}` -> poll job status and fetch file URLs
-- `POST /jobs/{job_id}/cancel` -> request cancellation for queued/running jobs
-- `GET /outputs/{job_id}/{filename}` -> download artifacts
-- `GET /sample-prompts` -> sample prompts for UI
-- `GET /ready` -> readiness diagnostics for queue/storage backends
+## Pipeline (high level)
 
-## Notes
+1. **`POST /generate`** — Creates a job and enqueues prompt/spec work, optional brand research (Tavily when configured), then pauses for **image-generation preview** review when applicable.  
+2. **`POST /jobs/{id}/confirm-image-generation`** — Continues to reference image generation (and downstream steps). **`POST .../save-image-generation-preview`** refreshes the prompt preview from edited research text without leaving that wait state.  
+3. After concept images exist, the job waits for **`POST /jobs/{id}/confirm-concept`** to run Meshy (and optional format selection). **`POST .../regenerate-concept`**, **`.../add-concept-style`**, and **`.../select-concept-style`** support iteration while awaiting that confirmation.  
+4. **`POST /jobs/{id}/regenerate-3d`** — Re-runs Meshy from the saved front reference after completion or failure.  
 
-- Prompt parsing uses the LLM when `OPENAI_API_KEY` is set, and falls back to simple heuristics if the call fails or the key is missing.
-- Set `OPENAI_API_KEY` (optional `OPENAI_MODEL`, default `gpt-4o-mini`) for LLM-backed parsing.
-- To use a non-OpenAI provider (including self-hosted open-source models) via an OpenAI-compatible API, set `OPENAI_BASE_URL`.
-  - Example (DeepSeek hosted): `OPENAI_BASE_URL=https://api.deepseek.com`
-  - Example (local Ollama): `OPENAI_BASE_URL=http://localhost:11434/v1` (and set `OPENAI_MODEL` to a local model id)
-- Storage backend supports `STORAGE_BACKEND=local|s3` (default `local`).
-- For S3 mode, configure `S3_BUCKET` and optional `S3_REGION`/`S3_PUBLIC_BASE_URL`.
-- Queue backend supports `QUEUE_BACKEND=inline|rq` (default `inline`).
-- For RQ mode, configure `REDIS_URL` and optional `RQ_QUEUE_NAME`.
-- Optional auth: set `API_AUTH_TOKEN` and send `x-api-token` plus `x-user-id` headers.
-- Jobs are user-scoped via `user_id` ownership checks.
-- Error codes: `INVALID_SPEC`, `UNSUPPORTED_OBJECT_TYPE`, `GENERATION_FAILED`, `RENDER_FAILED`.
+Poll **`GET /jobs/{id}`** (or list **`GET /jobs`**) for status and file URLs. **`DELETE /jobs/{id}`** removes a job and its artifacts.
+
+## HTTP API (summary)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Liveness |
+| GET | `/ready` | Queue, storage, Composio readiness |
+| POST | `/generate` | Start a job |
+| GET | `/jobs` | List recent jobs for the authenticated user (`?limit=`) |
+| GET | `/jobs/{job_id}` | Job payload |
+| DELETE | `/jobs/{job_id}` | Delete job + artifacts |
+| POST | `/jobs/{job_id}/confirm-image-generation` | Continue after research / image prompt review |
+| POST | `/jobs/{job_id}/save-image-generation-preview` | Rebuild image prompt preview only |
+| POST | `/jobs/{job_id}/confirm-concept` | Approve references → Meshy (`target_formats` in JSON body) |
+| POST | `/jobs/{job_id}/regenerate-concept` | New reference images while awaiting concept confirmation |
+| POST | `/jobs/{job_id}/add-concept-style` | Enqueue an extra style variation |
+| POST | `/jobs/{job_id}/select-concept-style` | Pick a generated style index as canonical |
+| POST | `/jobs/{job_id}/regenerate-3d` | Re-run Meshy after `completed` / `failed` |
+| POST | `/jobs/{job_id}/cancel` | Request cancellation |
+| POST | `/assets/analyze` | Multipart reference/sketch analysis → text sections |
+| GET | `/viewer/models` | Jobs with `model.glb` (Quest viewer sync; camelCase JSON) |
+| GET | `/composio/toolkits` | Allowed toolkits |
+| POST | `/composio/connect` | Start OAuth for a toolkit |
+| POST | `/composio/disconnect` | Disconnect toolkit |
+| POST | `/composio/fetch` | Pull a file/page into context |
+| POST | `/composio/drive/browse` | Browse or search Google Drive via Composio |
+| GET | `/outputs/...` | Download generated files |
+
+Auth: when `API_AUTH_TOKEN` is set, requests must include `x-api-token` and `x-user-id`. Jobs are scoped to `user_id`.
+
+## Configuration notes
+
+Full variable list and comments live in [`.env.example`](.env.example). Highlights:
+
+- **LLM / spec:** `OPENAI_API_KEY`; optional `OPENAI_BASE_URL`, `OPENAI_MODEL`. Heuristic fallback exists if the LLM call fails or the key is missing.  
+- **Reference images:** OpenAI Images API (`gpt-image-1`, DALL·E, etc.). For a split stack (e.g. DeepSeek for chat only), set `IMAGE_OPENAI_API_KEY` + `IMAGE_OPENAI_BASE_URL` to OpenAI—non-OpenAI keys against the images endpoint return 401.  
+- **Meshy:** `MESHY_API_KEY` for image-to-3D.  
+- **Research:** `TAVILY_API_KEY` enables live web search in brand research; without it, research uses the prompt and uploaded context only.  
+- **Storage:** `STORAGE_BACKEND=local|s3`; for S3 set `S3_BUCKET` and optional `S3_REGION` / `S3_PUBLIC_BASE_URL`.  
+- **CDN for PNGs:** Optional Cloudinary (`CLOUDINARY_*`); meshes and JSON still follow `STORAGE_BACKEND`.  
+- **Composio:** `COMPOSIO_API_KEY` and `COMPOSIO_ALLOWED_TOOLKITS` for pulling Google Drive, Notion, etc. into context documents.  
+- **Backboard:** Optional [Backboard](https://docs.backboard.io/) integration for research synthesis, web search, thread RAG, and asset analysis—see toggles in `.env.example`.  
+
+## Error codes
+
+The API may surface structured errors including: `INVALID_SPEC`, `UNSUPPORTED_OBJECT_TYPE`, `GENERATION_FAILED`, `RENDER_FAILED` (exact usage depends on the failing stage—see responses and server logs).
+
+## Quest headset
+
+For loading `model.glb` URLs from this stack on device, use the Unity project under [`quest-viewer/`](quest-viewer/) and its [README](quest-viewer/README.md).

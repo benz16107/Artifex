@@ -2,6 +2,7 @@
 
 import type { JobPayload } from "@/lib/api";
 import { outputUrl } from "@/lib/api";
+import { cloudinaryThumb } from "@/lib/cloudinaryDelivery";
 
 type PipelineConceptRefsProps = {
   conceptReferences?: JobPayload["concept_references"];
@@ -21,7 +22,7 @@ export function PipelineConceptRefs({
     if (url) {
       tiles.push({
         key,
-        url,
+        url: cloudinaryThumb(url, 400) ?? url,
         label: key === "three_quarter" ? "Three-quarter" : "Front",
       });
     }

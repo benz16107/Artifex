@@ -57,10 +57,21 @@ class AddConceptStyleRequest(BaseModel):
         return stripped or None
 
 
+class ResearchBriefPayload(BaseModel):
+    """Structured research brief edited by the user before reference-image generation."""
+
+    brand_snapshot: str | None = Field(default=None, max_length=4000)
+    visual_packaging_cues: str | None = Field(default=None, max_length=4000)
+    category_competitive_notes: str | None = Field(default=None, max_length=4000)
+    financial_snapshot: str | None = Field(default=None, max_length=4000)
+    corporate_strategy: str | None = Field(default=None, max_length=4000)
+
+
 class ConfirmImageGenerationRequest(BaseModel):
     """Optional research text override before reference-image generation."""
 
     research_digest: str | None = Field(default=None, max_length=8000)
+    research_brief: ResearchBriefPayload | None = Field(default=None)
 
 
 class ConfirmConceptRequest(BaseModel):

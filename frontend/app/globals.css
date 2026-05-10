@@ -153,7 +153,7 @@ body {
   /* Fill the visible viewport (minus the app header, flow stepper, and page padding)
      so the 3D viewer actually uses the screen on the export page. Falls back to a
      reasonable min on shorter viewports and is capped so it never gets absurdly tall. */
-  min-height: clamp(480px, calc(100dvh - 220px), 1100px);
+  min-height: clamp(560px, calc(100dvh - 200px), 1200px);
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -178,6 +178,26 @@ body {
 
 .panel--downloads {
   padding-bottom: 16px;
+}
+
+.modelViewAngleExport__host {
+  position: fixed;
+  left: -2400px;
+  top: 0;
+  width: 768px;
+  height: 768px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.02;
+}
+
+.modelViewAngleExport__viewer {
+  width: 768px;
+  height: 768px;
+}
+
+.modelViewAngleExport .panel__muted {
+  margin-top: 4px;
 }
 
 .panel__h {
@@ -1183,6 +1203,268 @@ body {
   overflow: auto;
 }
 
+.researchEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.researchEditor__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.researchEditor__eyebrowRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.researchEditor__eyebrow {
+  font-family: var(--font-heading);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted2);
+}
+
+.researchEditor__progress {
+  font-family: var(--font-heading);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted2);
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+
+.researchEditor__lead {
+  margin: 0;
+  font-family: var(--font-body-text);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 64ch;
+}
+
+.researchEditor__cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 940px) {
+  .researchEditor__cards {
+    grid-template-columns: 1fr 1fr;
+  }
+  .researchEditor__card:nth-child(5) {
+    grid-column: 1 / -1;
+  }
+}
+
+.researchEditor__card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  position: relative;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.researchEditor__card.is-filled {
+  border-color: var(--border2);
+  box-shadow: 0 1px 2px rgba(20, 20, 19, 0.04), 0 0 0 1px rgba(217, 119, 87, 0.08) inset;
+}
+
+.researchEditor__card.is-empty {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface2) 100%);
+}
+
+.researchEditor__card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.researchEditor__cardHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.researchEditor__cardIndex {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  font-family: var(--font-heading);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.researchEditor__card.is-filled .researchEditor__cardIndex {
+  background: var(--accent-soft);
+  border-color: rgba(217, 119, 87, 0.35);
+  color: var(--accent2);
+}
+
+.researchEditor__cardHeading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.researchEditor__cardTitle {
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  cursor: text;
+}
+
+.researchEditor__cardDesc {
+  margin: 0;
+  font-family: var(--font-body-text);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--muted2);
+}
+
+.researchEditor__cardInput {
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  font-family: var(--font-body-text);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg0);
+  outline: none;
+  resize: vertical;
+  min-height: 5.5rem;
+  max-height: 30rem;
+  overflow-y: auto;
+}
+
+.researchEditor__cardInput::placeholder {
+  color: var(--muted2);
+  opacity: 0.85;
+}
+
+.researchEditor__cardInput:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.researchEditor__cardInput:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.researchEditor--compact .researchEditor__cards {
+  gap: 10px;
+}
+
+.researchEditor--compact .researchEditor__card {
+  padding: 12px 14px 14px;
+}
+
+.researchEditor--compact .researchEditor__cardInput {
+  min-height: 4rem;
+  font-size: 0.88rem;
+}
+
+.researchEditor--compact .researchEditor__cardTitle {
+  font-size: 0.9rem;
+}
+
+.researchEditor--compact .researchEditor__cardDesc {
+  font-size: 0.78rem;
+}
+
+.conceptStage--research {
+  gap: 16px;
+}
+
+.conceptStage__eyebrow {
+  margin: 0 0 6px;
+  font-family: var(--font-heading);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent2);
+}
+
+.conceptStage__company {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 6px 10px 6px 8px;
+  border-radius: 999px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--text);
+  width: fit-content;
+}
+
+.conceptStage__companyLabel {
+  font-family: var(--font-heading);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted2);
+}
+
+.conceptStage__companyValue {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.conceptStage__warnings {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid rgba(217, 119, 87, 0.25);
+  font-family: var(--font-body-text);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--accent2);
+}
+
+.conceptStage__actions--research {
+  margin-top: 4px;
+  align-items: center;
+}
+
 .downloadChips {
   display: flex;
   flex-wrap: wrap;
@@ -1683,7 +1965,7 @@ body {
 }
 
 .split__stage > .stageWithConceptRefs {
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-height: 0;
   width: 100%;
   display: flex;
@@ -1692,7 +1974,9 @@ body {
 }
 
 .stageWithConceptRefs > .stagePanel {
-  flex: 1 1 auto;
+  /* basis 0 so the 3D column shares height predictably; avoids a huge gray frame with a
+     tiny unresolved-percentage canvas stuck in the corner of model-viewer. */
+  flex: 1 1 0%;
   min-height: 0;
   width: 100%;
 }
@@ -1875,18 +2159,20 @@ body {
 }
 
 .modelViewerFrame {
-  flex: 1 1 0%;
-  min-height: max(280px, 36vh);
-  min-width: 0;
+  /* Definite block size: model-viewer defaults to a 300×150 canvas when height is
+     unresolved (common with flex/grid). vh + clamp keeps the export/mesh preview large. */
   position: relative;
+  width: 100%;
+  height: clamp(420px, 72dvh, 980px);
+  flex: 0 0 auto;
+  min-width: 0;
   background: linear-gradient(180deg, var(--brand-light-gray), #dcd8ce);
 }
 
 .modelViewerEl {
+  display: block;
   width: 100%;
   height: 100%;
-  min-height: 320px;
-  display: block;
 }
 
 .previewStrip {
@@ -2242,6 +2528,15 @@ body {
   border-radius: var(--radius);
   background: var(--surface);
   padding: 18px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.homeLanding__researchPreviewHead {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .homeLanding__researchPreviewEyebrow {
@@ -2273,11 +2568,11 @@ body {
 }
 
 .homeLanding__researchPreviewActions {
-  margin-top: 16px;
+  margin-top: 4px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
 }
 
 .homeLanding__researchPreviewHint {
@@ -2757,6 +3052,10 @@ body {
   aspect-ratio: 4 / 3;
   background: var(--brand-light-gray);
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
 }
 
 .portfolioCard__img {
@@ -2820,14 +3119,24 @@ body {
 
 .portfolioCard__viewerSlot {
   position: relative;
+  flex: 1 1 auto;
+  align-self: stretch;
   width: 100%;
+  min-width: 0;
+  min-height: 0;
   height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: var(--surface2);
 }
 
 .portfolioCard__modelViewer {
+  display: block;
   width: 100%;
   height: 100%;
+  max-width: 100%;
+  max-height: 100%;
   background: var(--surface2);
 }
 

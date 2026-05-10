@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { AddAssetsBlock, type AddAssetKind, type AddAssetsHandle } from "@/components/AddAssetsBlock";
 import { PortfolioSection } from "@/components/PortfolioSection";
-import type { JobPayload } from "@/lib/api";
+import type { JobPayload, ResearchBrief } from "@/lib/api";
 function ToolPillChevron() {
   return (
     <span className="homeLanding__toolPillChevron" aria-hidden>
@@ -38,8 +38,8 @@ type HomeLandingProps = {
   onResumePipeline?: (job: JobPayload) => void;
   /** When the pipeline is minimized, show research + confirm under Your 3D models only. */
   imagePreviewJob?: JobPayload | null;
-  researchSummaryDraft?: string;
-  onChangeResearchSummaryDraft?: (value: string) => void;
+  researchBriefDraft?: ResearchBrief;
+  onChangeResearchBriefDraft?: (value: ResearchBrief) => void;
   onConfirmImagePreview?: () => void;
   onSaveResearchSummaryPreview?: () => void;
   imagePreviewBusy?: boolean;
@@ -68,8 +68,8 @@ export function HomeLanding({
   backgroundJobs = [],
   onResumePipeline,
   imagePreviewJob = null,
-  researchSummaryDraft = "",
-  onChangeResearchSummaryDraft,
+  researchBriefDraft,
+  onChangeResearchBriefDraft,
   onConfirmImagePreview,
   onSaveResearchSummaryPreview,
   imagePreviewBusy = false,
@@ -264,8 +264,8 @@ export function HomeLanding({
         backgroundJobs={backgroundJobs}
         onResumePipeline={onResumePipeline}
         imagePreviewJob={imagePreviewJob}
-        researchSummaryDraft={researchSummaryDraft}
-        onChangeResearchSummaryDraft={onChangeResearchSummaryDraft}
+        researchBriefDraft={researchBriefDraft}
+        onChangeResearchBriefDraft={onChangeResearchBriefDraft}
         onConfirmImagePreview={onConfirmImagePreview}
         onSaveResearchSummaryPreview={onSaveResearchSummaryPreview}
         imagePreviewBusy={imagePreviewBusy}

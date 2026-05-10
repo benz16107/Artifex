@@ -78,6 +78,8 @@ def create_job(
         "research_brief": None,
         "research_warnings": [],
         "image_generation_preview": None,
+        "backboard_thread_id": None,
+        "backboard_assistant_id": None,
     }
     _write(path / JOB_METADATA_FILENAME, data)
     return data

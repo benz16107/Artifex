@@ -54,6 +54,34 @@ RESEARCH_LLM_MAX_RETRIES = int(os.getenv("RESEARCH_LLM_MAX_RETRIES", "1"))
 RESEARCH_TAVILY_MAX_RESULTS = int(os.getenv("RESEARCH_TAVILY_MAX_RESULTS", "5"))
 RESEARCH_MAX_QUERIES = int(os.getenv("RESEARCH_MAX_QUERIES", "3"))
 
+# Optional Backboard (https://docs.backboard.io/) for research synthesis, web search, thread documents, memory, asset analysis.
+BACKBOARD_API_KEY = (os.getenv("BACKBOARD_API_KEY") or "").strip() or None
+BACKBOARD_BASE_URL = (os.getenv("BACKBOARD_BASE_URL") or "https://app.backboard.io/api").rstrip("/")
+BACKBOARD_ASSISTANT_ID = (os.getenv("BACKBOARD_ASSISTANT_ID") or "").strip() or None
+BACKBOARD_LLM_PROVIDER = (os.getenv("BACKBOARD_LLM_PROVIDER") or "openai").strip() or "openai"
+BACKBOARD_MODEL_NAME = (os.getenv("BACKBOARD_MODEL_NAME") or "gpt-4o").strip() or "gpt-4o"
+BACKBOARD_HTTP_TIMEOUT_SECONDS = int(os.getenv("BACKBOARD_HTTP_TIMEOUT_SECONDS", "180"))
+BACKBOARD_DOCUMENT_POLL_INTERVAL_SECONDS = float(os.getenv("BACKBOARD_DOCUMENT_POLL_INTERVAL_SECONDS", "2"))
+BACKBOARD_DOCUMENT_POLL_MAX_SECONDS = int(os.getenv("BACKBOARD_DOCUMENT_POLL_MAX_SECONDS", "180"))
+# Memory Lite on message sends: off | Auto | Readonly (see Backboard docs).
+BACKBOARD_MEMORY = (os.getenv("BACKBOARD_MEMORY") or "off").strip() or "off"
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Requires BACKBOARD_API_KEY: use Backboard for brand-research JSON synthesis instead of OpenAI chat completions.
+ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS = _env_truthy("ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS")
+# Requires ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS: skip Tavily and use Backboard web_search Auto on the synthesis call.
+ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY = _env_truthy("ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY")
+# With Tavily snippets in the prompt, also enable Backboard web_search Auto (JSON output may be disabled by Backboard).
+ARTIFEX_BACKBOARD_RESEARCH_MERGE_WEB = _env_truthy("ARTIFEX_BACKBOARD_RESEARCH_MERGE_WEB")
+# Upload internal context strings as thread documents (RAG) before synthesis; requires BACKBOARD_API_KEY and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS.
+ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS = _env_truthy("ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS")
+# Analyze uploaded reference assets via Backboard multipart /threads/messages (instead of OpenAI chat completions).
+ARTIFEX_BACKBOARD_ASSET_ANALYSIS = _env_truthy("ARTIFEX_BACKBOARD_ASSET_ANALYSIS")
+
 # Concept pipeline: image reference + image->3D
 # Reference images use OpenAI Images: /v1/images/generations (typically api.openai.com).
 # Reuse OPENAI_API_KEY for images when you're on OpenAI (default) or an unknown host —
@@ -104,6 +132,11 @@ STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")  # local | s3
 S3_BUCKET = os.getenv("S3_BUCKET")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
+
+# Optional: deliver PNG previews and concept references via Cloudinary (CDN + URL transforms).
+CLOUDINARY_CLOUD_NAME = (os.getenv("CLOUDINARY_CLOUD_NAME") or "").strip() or None
+CLOUDINARY_API_KEY = (os.getenv("CLOUDINARY_API_KEY") or "").strip() or None
+CLOUDINARY_API_SECRET = (os.getenv("CLOUDINARY_API_SECRET") or "").strip() or None
 
 QUEUE_BACKEND = os.getenv("QUEUE_BACKEND", "inline")  # inline | rq
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")

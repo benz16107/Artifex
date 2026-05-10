@@ -1,4 +1,4 @@
-"""Web-grounded brand research (Tavily) + LLM synthesis for concept image prompts."""
+"""Web-grounded brand research (Tavily and/or Backboard) + LLM synthesis for concept image prompts."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ from typing import Any
 from urllib import error, request
 
 from app.config import (
+    ARTIFEX_BACKBOARD_RESEARCH_MERGE_WEB,
+    ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY,
+    ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS,
+    ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MODEL,
@@ -20,11 +24,15 @@ from app.config import (
     RESEARCH_TAVILY_MAX_RESULTS,
     TAVILY_API_KEY,
 )
+from app.services import backboard
 from app.services.jobs import CancelledGeneration
 
 logger = logging.getLogger("object-first-mvp")
 
 RESEARCH_JSON_FILENAME = "research.json"
+
+_MAX_THREAD_CONTEXT_FILES = 8
+_MAX_THREAD_CONTEXT_BYTES = 400_000
 
 
 @dataclass
@@ -36,6 +44,8 @@ class BrandResearchResult:
     brief: dict[str, str]
     warnings: list[str]
     tavily_results: list[dict[str, Any]]
+    backboard_thread_id: str | None = None
+    backboard_assistant_id: str | None = None
 
 
 def _trim(s: str, limit: int) -> str:
@@ -211,6 +221,119 @@ def _post_synthesis_json(
     raise ValueError(last_err or "Research synthesis failed.")
 
 
+def _brand_synthesis_system_prompt(*, strict_json_prose: bool) -> str:
+    base = (
+        "You are a brand and product research assistant for industrial design concept art. "
+        "Return a single JSON object with these keys: "
+        "brand_snapshot (string, 2-4 sentences on who the company is, who it serves, and how it positions itself), "
+        "visual_packaging_cues (string, bullets or short paragraph about colors, finishes, materials, logo usage, "
+        "packaging conventions if known), "
+        "category_competitive_notes (string, short — competitive context, category norms, what differentiation looks like), "
+        "financial_snapshot (string, 2-4 short bullets summarising recent financial signals — revenue trajectory, "
+        "profitability, cost discipline, capital allocation — and translating each into a concrete implication for "
+        "this product's positioning, material grade, finish quality, packaging investment, or price tier; if no "
+        "financial info is available, say 'No reliable financial signals available.'), "
+        "corporate_strategy (string, 2-4 short bullets summarising stated strategic priorities, target segments, "
+        "growth bets, sustainability or technology themes, and translating each into a concrete implication for "
+        "what kind of product this should become — its archetype, feature emphasis, target user, and visual tone; "
+        "if no strategy info is available, say 'No stated corporate strategy found.'), "
+        "research_digest (string, max 1800 chars, plain English bullets the image model can follow; the digest MUST "
+        "fold financial_snapshot and corporate_strategy implications into product/visual decisions — e.g. material "
+        "grade, finish, color emphasis, form factor, packaging cue — not just repeat the financial/strategy bullets; "
+        "no URLs inside digest; if a fact is only from web snippets say 'reportedly'; "
+        "if internal documents conflict with web, prefer internal documents for brand rules), "
+        "sources (array of objects with keys source_id int, title string, url string, supporting_quote string under 240 chars). "
+        "Every non-obvious factual claim in research_digest should map to a source in `sources` when web snippets exist. "
+        "If there are no web snippets, sources may be an empty array."
+    )
+    if strict_json_prose:
+        return base + " Respond with one JSON object only (no markdown, no prose outside JSON)."
+    return base
+
+
+def _post_backboard_brand_json(
+    system: str,
+    user_block: str,
+    *,
+    thread_id: str | None,
+    use_web_search: bool,
+    multipart_files: list[tuple[str, str, bytes]] | None,
+    is_cancelled: Callable[[], bool] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (parsed_json, raw_backboard_response)."""
+    web = "Auto" if use_web_search else "off"
+    json_ok = bool(not use_web_search)
+    last_err: str | None = None
+    for attempt in range(max(1, RESEARCH_LLM_MAX_RETRIES + 1)):
+        if is_cancelled and is_cancelled():
+            raise CancelledGeneration("Brand research cancelled by user.")
+        try:
+            raw = backboard.send_message(
+                content=user_block,
+                thread_id=thread_id,
+                system_prompt=system,
+                web_search=web,
+                json_output=json_ok,
+                multipart_files=multipart_files,
+            )
+            text = backboard.assistant_text(raw)
+            parsed = backboard.parse_json_content(text)
+            return parsed, raw
+        except CancelledGeneration:
+            raise
+        except (backboard.BackboardError, json.JSONDecodeError, ValueError) as exc:
+            last_err = str(exc)[:500]
+            if attempt < RESEARCH_LLM_MAX_RETRIES:
+                continue
+            break
+    raise ValueError(last_err or "Backboard research synthesis failed.")
+
+
+def _backboard_upload_thread_context(
+    documents: list[str],
+    *,
+    is_cancelled: Callable[[], bool] | None,
+) -> tuple[str | None, str | None, list[str]]:
+    """Create a thread, upload UTF-8 context .txt files, wait for indexing. Returns (thread_id, assistant_id, warnings)."""
+    warnings: list[str] = []
+    nonempty = [d.strip() for d in documents if (d or "").strip()]
+    if not nonempty:
+        return None, None, warnings
+    try:
+        boot = backboard.send_message(
+            content="(Artifex) Indexing internal context documents; no reply needed.",
+            send_to_llm="false",
+        )
+    except backboard.BackboardError as exc:
+        warnings.append(f"backboard_thread_docs_boot_failed:{str(exc)[:160]}")
+        return None, None, warnings
+
+    thread_id = str(boot.get("thread_id") or "").strip() or None
+    assistant_id = str(boot.get("assistant_id") or "").strip() or None
+    if not thread_id:
+        warnings.append("backboard_thread_docs_missing_thread_id")
+        return None, None, warnings
+
+    for i, blob in enumerate(nonempty[:_MAX_THREAD_CONTEXT_FILES]):
+        if is_cancelled and is_cancelled():
+            raise CancelledGeneration("Brand research cancelled by user.")
+        raw_txt = blob.encode("utf-8", errors="replace")[:_MAX_THREAD_CONTEXT_BYTES]
+        fname = f"context_{i}.txt"
+        try:
+            up = backboard.upload_thread_document(thread_id, fname, raw_txt)
+            doc_id = str(up.get("document_id") or "").strip()
+            if not doc_id:
+                warnings.append(f"backboard_upload_missing_document_id:{fname}")
+                continue
+            backboard.wait_document_indexed(doc_id, is_cancelled=is_cancelled)
+        except (backboard.BackboardError, CancelledGeneration) as exc:
+            if isinstance(exc, CancelledGeneration):
+                raise
+            warnings.append(f"backboard_thread_doc_failed:{fname}:{str(exc)[:120]}")
+    warnings.append("backboard_thread_context_documents_indexed")
+    return thread_id, assistant_id, warnings
+
+
 def _fallback_from_documents(company: str | None, prompt: str, documents: list[str]) -> BrandResearchResult:
     blob = "\n\n".join(documents).strip()
     digest = (
@@ -225,91 +348,34 @@ def _fallback_from_documents(company: str | None, prompt: str, documents: list[s
             "brand_snapshot": company or "Not specified.",
             "visual_packaging_cues": "See internal context documents only.",
             "category_competitive_notes": "Web research was not available.",
+            "financial_snapshot": "No reliable financial signals available.",
+            "corporate_strategy": "No stated corporate strategy found.",
         },
         warnings=["synthesis_fallback_no_llm_json"],
         tavily_results=[],
     )
 
 
-def run_brand_research(
+def _brand_result_from_parsed(
+    parsed: dict[str, Any],
     *,
-    company: str | None,
-    prompt: str,
-    documents: list[str],
-    is_cancelled: Callable[[], bool] | None = None,
+    tavily_rows: list[dict[str, Any]],
+    warnings: list[str],
+    bb_thread: str | None,
+    bb_assistant: str | None,
 ) -> BrandResearchResult:
-    """
-    Run Tavily web search (when TAVILY_API_KEY is set) + one chat call for digest and sources.
-
-    Without TAVILY_API_KEY, only user documents + idea inform the brief (see research warnings).
-    """
-    tavily_rows, warnings = _collect_tavily_hits(company, prompt, is_cancelled=is_cancelled)
-    if is_cancelled and is_cancelled():
-        raise CancelledGeneration("Brand research cancelled by user.")
-
-    doc_join = "\n\n---\n\n".join(documents) if documents else ""
-    doc_excerpt = _trim(doc_join, 8000)
-
-    hits_lines: list[str] = []
-    for i, row in enumerate(tavily_rows[:25]):
-        title = (row.get("title") or "").strip()
-        url = (row.get("url") or "").strip()
-        content = _trim((row.get("content") or "").strip(), 600)
-        hits_lines.append(f"[{i}] title={title!r} url={url!r}\ncontent: {content}")
-
-    user_block = (
-        f"Company (user): {company or 'none'}\n"
-        f"Product idea (user):\n{prompt.strip()[:2000]}\n\n"
-        f"Internal document excerpts (authoritative for confidential brand rules):\n{doc_excerpt or '(none)'}\n\n"
-        f"Web search snippets (public; may be incomplete):\n"
-        f"{chr(10).join(hits_lines) if hits_lines else '(no web results)'}\n"
-    )
-
-    system = (
-        "You are a brand and product research assistant for industrial design concept art. "
-        "Return a single JSON object with these keys: "
-        "brand_snapshot (string, 2-4 sentences), "
-        "visual_packaging_cues (string, bullets or short paragraph about colors, finishes, logo usage if known), "
-        "category_competitive_notes (string, short), "
-        "research_digest (string, max 1800 chars, plain English bullets the image model can follow; "
-        "no URLs inside digest; if a fact is only from web snippets say 'reportedly'; "
-        "if internal documents conflict with web, prefer internal documents for brand rules), "
-        "sources (array of objects with keys source_id int, title string, url string, supporting_quote string under 240 chars). "
-        "Every non-obvious factual claim in research_digest should map to a source in `sources` when web snippets exist. "
-        "If there are no web snippets, sources may be an empty array."
-    )
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_block},
-    ]
-
-    use_json = "openai.com" in (OPENAI_BASE_URL or "").lower()
-    try:
-        parsed = _post_synthesis_json(messages, use_json_object_format=use_json)
-    except ValueError as exc:
-        logger.warning("brand_research_synthesis_failed err=%s", exc)
-        warnings.append(f"synthesis_error:{str(exc)[:120]}")
-        if not OPENAI_API_KEY:
-            return _fallback_from_documents(company, prompt, documents)
-        return BrandResearchResult(
-            digest=_trim(doc_excerpt or (prompt.strip()[:1200]), 1800),
-            sources=[],
-            brief={
-                "brand_snapshot": company or "",
-                "visual_packaging_cues": "",
-                "category_competitive_notes": str(exc)[:200],
-            },
-            warnings=warnings,
-            tavily_results=tavily_rows,
-        )
-
     digest = _trim(str(parsed.get("research_digest") or "").strip(), 2000)
     if not digest:
         digest = _trim(
             "\n".join(
                 str(parsed.get(k) or "")
-                for k in ("brand_snapshot", "visual_packaging_cues", "category_competitive_notes")
+                for k in (
+                    "brand_snapshot",
+                    "visual_packaging_cues",
+                    "category_competitive_notes",
+                    "financial_snapshot",
+                    "corporate_strategy",
+                )
             ),
             2000,
         )
@@ -337,6 +403,8 @@ def run_brand_research(
         "brand_snapshot": str(parsed.get("brand_snapshot") or "").strip(),
         "visual_packaging_cues": str(parsed.get("visual_packaging_cues") or "").strip(),
         "category_competitive_notes": str(parsed.get("category_competitive_notes") or "").strip(),
+        "financial_snapshot": str(parsed.get("financial_snapshot") or "").strip(),
+        "corporate_strategy": str(parsed.get("corporate_strategy") or "").strip(),
     }
 
     return BrandResearchResult(
@@ -345,4 +413,149 @@ def run_brand_research(
         brief=brief,
         warnings=list(warnings),
         tavily_results=tavily_rows,
+        backboard_thread_id=bb_thread,
+        backboard_assistant_id=bb_assistant,
+    )
+
+
+def run_brand_research(
+    *,
+    company: str | None,
+    prompt: str,
+    documents: list[str],
+    is_cancelled: Callable[[], bool] | None = None,
+) -> BrandResearchResult:
+    """
+    Run web context (Tavily and/or Backboard) plus one synthesis call (OpenAI or Backboard).
+
+    See .env.example for ARTIFEX_BACKBOARD_* and BACKBOARD_* options.
+    """
+    warnings: list[str] = []
+    backboard_syn = bool(ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and backboard.is_configured())
+    if ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS and not backboard.is_configured():
+        warnings.append(
+            "ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS is enabled but BACKBOARD_API_KEY is missing; using OpenAI for synthesis."
+        )
+
+    skip_tavily = bool(ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY and backboard_syn)
+    merge_web = bool(ARTIFEX_BACKBOARD_RESEARCH_MERGE_WEB and backboard_syn and not skip_tavily)
+    thread_docs = bool(ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS and backboard_syn)
+
+    if ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY and not backboard_syn:
+        warnings.append(
+            "ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY requires BACKBOARD_API_KEY and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS; "
+            "Tavily path is used instead."
+        )
+        skip_tavily = False
+
+    if ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS and not backboard_syn:
+        warnings.append(
+            "ARTIFEX_BACKBOARD_RESEARCH_THREAD_DOCS requires BACKBOARD_API_KEY and ARTIFEX_BACKBOARD_RESEARCH_SYNTHESIS."
+        )
+
+    if skip_tavily:
+        tavily_rows: list[dict[str, Any]] = []
+        warnings.append("Using Backboard web_search instead of Tavily (ARTIFEX_BACKBOARD_RESEARCH_SKIP_TAVILY).")
+    else:
+        tavily_rows, w_t = _collect_tavily_hits(company, prompt, is_cancelled=is_cancelled)
+        warnings.extend(w_t)
+
+    if is_cancelled and is_cancelled():
+        raise CancelledGeneration("Brand research cancelled by user.")
+
+    doc_join = "\n\n---\n\n".join(documents) if documents else ""
+    doc_excerpt = _trim(doc_join, 8000)
+
+    hits_lines: list[str] = []
+    for i, row in enumerate(tavily_rows[:25]):
+        title = (row.get("title") or "").strip()
+        url = (row.get("url") or "").strip()
+        content = _trim((row.get("content") or "").strip(), 600)
+        hits_lines.append(f"[{i}] title={title!r} url={url!r}\ncontent: {content}")
+
+    bb_thread: str | None = None
+    bb_assistant: str | None = None
+    use_inline_docs = True
+    if thread_docs and documents and any((d or "").strip() for d in documents):
+        bb_thread, bb_aid_upload, w_docs = _backboard_upload_thread_context(documents, is_cancelled=is_cancelled)
+        warnings.extend(w_docs)
+        if bb_thread:
+            use_inline_docs = False
+            bb_assistant = bb_aid_upload or bb_assistant
+
+    if use_inline_docs:
+        internal_block = f"Internal document excerpts (authoritative for confidential brand rules):\n{doc_excerpt or '(none)'}\n\n"
+    else:
+        internal_block = (
+            "Internal context: authoritative excerpts were uploaded as indexed thread documents on this Backboard thread. "
+            "Use them as binding for confidential brand rules.\n\n"
+        )
+
+    user_block = (
+        f"Company (user): {company or 'none'}\n"
+        f"Product idea (user):\n{prompt.strip()[:2000]}\n\n"
+        f"{internal_block}"
+        f"Web search snippets (public; may be incomplete):\n"
+        f"{chr(10).join(hits_lines) if hits_lines else '(no Tavily snippets in this request)'}\n"
+    )
+
+    use_web = bool(skip_tavily or merge_web)
+    strict_json = bool(use_web or merge_web)
+    system = _brand_synthesis_system_prompt(strict_json_prose=strict_json)
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_block},
+    ]
+
+    if merge_web:
+        warnings.append(
+            "ARTIFEX_BACKBOARD_RESEARCH_MERGE_WEB: Tavily snippets are included and Backboard web_search is enabled."
+        )
+
+    use_json = "openai.com" in (OPENAI_BASE_URL or "").lower()
+
+    try:
+        if backboard_syn:
+            parsed, raw_bb = _post_backboard_brand_json(
+                system,
+                user_block,
+                thread_id=bb_thread,
+                use_web_search=use_web,
+                multipart_files=None,
+                is_cancelled=is_cancelled,
+            )
+            bb_thread = str(raw_bb.get("thread_id") or bb_thread or "").strip() or bb_thread
+            bb_assistant = str(raw_bb.get("assistant_id") or bb_assistant or "").strip() or bb_assistant
+        else:
+            parsed = _post_synthesis_json(messages, use_json_object_format=use_json)
+    except CancelledGeneration:
+        raise
+    except ValueError as exc:
+        logger.warning("brand_research_synthesis_failed err=%s", exc)
+        warnings.append(f"synthesis_error:{str(exc)[:120]}")
+        if not OPENAI_API_KEY and not backboard_syn:
+            return _fallback_from_documents(company, prompt, documents)
+        return BrandResearchResult(
+            digest=_trim(doc_excerpt or (prompt.strip()[:1200]), 1800),
+            sources=[],
+            brief={
+                "brand_snapshot": company or "",
+                "visual_packaging_cues": "",
+                "category_competitive_notes": str(exc)[:200],
+                "financial_snapshot": "",
+                "corporate_strategy": "",
+            },
+            warnings=warnings,
+            tavily_results=tavily_rows,
+            backboard_thread_id=bb_thread,
+            backboard_assistant_id=bb_assistant,
+        )
+
+    return _brand_result_from_parsed(
+        parsed,
+        tavily_rows=tavily_rows,
+        warnings=warnings,
+        bb_thread=bb_thread,
+        bb_assistant=bb_assistant,
     )

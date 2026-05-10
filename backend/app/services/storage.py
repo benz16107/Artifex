@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
 from app.config import S3_BUCKET, S3_PUBLIC_BASE_URL, S3_REGION, STORAGE_BACKEND
+from app.services.cloudinary_raster import (
+    cloudinary_raster_enabled,
+    cloudinary_raster_readiness,
+    upload_raster_file,
+)
 
 
 @dataclass(frozen=True)
@@ -171,7 +176,69 @@ class S3Storage:
             return False, f"s3 not ready: {exc}"
 
 
+class RasterCloudinaryStorage:
+    """Runs inner storage (local|S3), then uploads raster PNGs to Cloudinary when configured."""
+
+    def __init__(self, inner: StorageBackend) -> None:
+        self._inner = inner
+
+    def publish(self, job_id: str, output_dir: Path) -> ArtifactPaths:
+        paths = self._inner.publish(job_id, output_dir)
+        if not cloudinary_raster_enabled():
+            return paths
+        preview_local = output_dir / "preview.png"
+        if preview_local.exists():
+            url = upload_raster_file(preview_local, f"artifex/{job_id}/preview")
+            paths = replace(paths, preview=url)
+        return paths
+
+    def concept_reference_urls(self, job_id: str, output_dir: Path) -> dict[str, str]:
+        urls = self._inner.concept_reference_urls(job_id, output_dir)
+        if not cloudinary_raster_enabled():
+            return urls
+        out = dict(urls)
+        for view, fname, public_id in (
+            ("front", "reference_front.png", f"artifex/{job_id}/reference_front"),
+            ("three_quarter", "reference_three_quarter.png", f"artifex/{job_id}/reference_three_quarter"),
+        ):
+            p = output_dir / fname
+            if p.exists():
+                out[view] = upload_raster_file(p, public_id)
+        return out
+
+    def concept_style_slot_urls(self, job_id: str, output_dir: Path, style_index: int) -> dict[str, str]:
+        from app.services.concept_review import style_front_filename, style_three_quarter_filename
+
+        urls = self._inner.concept_style_slot_urls(job_id, output_dir, style_index)
+        if not cloudinary_raster_enabled():
+            return urls
+        out = dict(urls)
+        base = f"artifex/{job_id}/styles/{style_index}"
+        ff = style_front_filename(style_index)
+        tf = style_three_quarter_filename(style_index)
+        if (output_dir / ff).exists():
+            out["front"] = upload_raster_file(output_dir / ff, f"{base}/front")
+        if (output_dir / tf).exists():
+            out["three_quarter"] = upload_raster_file(output_dir / tf, f"{base}/three_quarter")
+        return out
+
+    def readiness(self) -> tuple[bool, str]:
+        inner_ok, inner_msg = self._inner.readiness()
+        if not cloudinary_raster_enabled():
+            return inner_ok, inner_msg
+        c_ok, c_msg = cloudinary_raster_readiness()
+        if inner_ok and c_ok:
+            return True, f"{inner_msg}; {c_msg}"
+        if not inner_ok:
+            return inner_ok, inner_msg
+        return c_ok, f"{inner_msg}; {c_msg}"
+
+
 def get_storage_backend() -> StorageBackend:
     if STORAGE_BACKEND == "s3":
-        return S3Storage()
-    return LocalStorage()
+        inner: StorageBackend = S3Storage()
+    else:
+        inner = LocalStorage()
+    if cloudinary_raster_enabled():
+        return RasterCloudinaryStorage(inner)
+    return inner

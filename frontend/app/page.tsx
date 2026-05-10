@@ -9,6 +9,7 @@ import type { AddAssetsHandle } from "@/components/AddAssetsBlock";
 import { HomeLanding } from "@/components/HomeLanding";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DeletePrototypeIcon } from "@/components/PortfolioSection";
+import { ModelViewAngleExport } from "@/components/ModelViewAngleExport";
 import { ModelViewer } from "@/components/ModelViewer";
 import { PipelineConceptRefs } from "@/components/PipelineConceptRefs";
 import type { ReferenceFilesHandle } from "@/components/ReferenceFilesBlock";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/flow";
 import {
   JobPayload,
+  ResearchBrief,
   addConceptStyle,
   cancelJob,
   deleteJob,
@@ -28,12 +30,20 @@ import {
   saveImageGenerationPreview,
   generateEnterprise,
   getJob,
+  listJobs,
   outputUrl,
   regenerate3dBuild,
   regenerateConceptArt,
   selectConceptStyle,
 } from "@/lib/api";
-import { buildResearchSummaryMessage } from "@/lib/researchSummary";
+import { cloudinaryOptimized, cloudinaryThumb } from "@/lib/cloudinaryDelivery";
+import {
+  buildResearchSummaryMessage,
+  digestFromBrief,
+  hasStructuredBrief,
+  readResearchBrief,
+} from "@/lib/researchSummary";
+import { ResearchSummaryEditor } from "@/components/ResearchSummaryEditor";
 import {
   clearActiveJobInSession,
   readWorkspaceSession,
@@ -42,6 +52,8 @@ import {
 } from "@/lib/workspaceSession";
 
 const POLL_MS = 1200;
+/** Keep enough history to surface a user's full recent gallery; bumped to align with the server-side recovery cap. */
+const MAX_HISTORY = 60;
 
 const FLOW_STEP_ORDER: FlowStepId[] = ["references", "mesh", "export"];
 
@@ -112,7 +124,7 @@ export default function HomePage() {
   jobRef.current = job;
   const sidecarJobsRef = useRef<JobPayload[]>([]);
   sidecarJobsRef.current = sidecarJobs;
-  const [researchSummaryDraft, setResearchSummaryDraft] = useState("");
+  const [researchBriefDraft, setResearchBriefDraft] = useState<ResearchBrief>({});
   const [researchPreviewSaveBusy, setResearchPreviewSaveBusy] = useState(false);
   const researchSummaryInitJobIdRef = useRef<string | null>(null);
 
@@ -128,7 +140,18 @@ export default function HomePage() {
       return;
     }
     if (researchSummaryInitJobIdRef.current !== job.job_id) {
-      setResearchSummaryDraft(buildResearchSummaryMessage(job));
+      if (hasStructuredBrief(job.research_brief)) {
+        setResearchBriefDraft(readResearchBrief(job));
+      } else {
+        const fallback = (job.research_digest ?? buildResearchSummaryMessage(job)).trim();
+        setResearchBriefDraft({
+          brand_snapshot: fallback,
+          visual_packaging_cues: "",
+          category_competitive_notes: "",
+          financial_snapshot: "",
+          corporate_strategy: "",
+        });
+      }
       researchSummaryInitJobIdRef.current = job.job_id;
     }
   }, [job, job?.job_id, job?.status]);
@@ -220,13 +243,38 @@ export default function HomePage() {
           setSidecarJobs(sideEntries.filter((entry): entry is JobPayload => Boolean(entry)));
         }
       }
+      let restoredHistory: JobPayload[] = [];
       if (saved.historyJobIds.length > 0) {
         const entries = await Promise.all(
           saved.historyJobIds.map((jobId) => withTimeout(getJob(jobId)).catch(() => null)),
         );
+        restoredHistory = entries.filter((entry): entry is JobPayload => Boolean(entry));
         if (!cancelled) {
-          setHistory(entries.filter((entry): entry is JobPayload => Boolean(entry)));
+          setHistory(restoredHistory);
         }
+      }
+      try {
+        const fromServer = await withTimeout(listJobs({ limit: 60 }));
+        if (!cancelled && fromServer.length > 0) {
+          const seen = new Set(restoredHistory.map((j) => j.job_id));
+          if (saved.activeJobId) seen.add(saved.activeJobId);
+          for (const sid of saved.sidecarJobIds ?? []) seen.add(sid);
+          const additions = fromServer.filter((j) => !seen.has(j.job_id));
+          if (additions.length > 0) {
+            setHistory((prev) => {
+              const have = new Set(prev.map((j) => j.job_id));
+              const merged = [...prev];
+              for (const j of additions) {
+                if (have.has(j.job_id)) continue;
+                merged.push(j);
+                have.add(j.job_id);
+              }
+              return merged;
+            });
+          }
+        }
+      } catch {
+        /* server-side recovery is best-effort; localStorage already populated what it could */
       }
       if (!cancelled) setWorkspacePersistEnabled(true);
     })();
@@ -334,7 +382,7 @@ export default function HomePage() {
                     setLoading(false);
                     setGenerateSubmitting(false);
                     setHistory((previous) =>
-                      [next, ...previous.filter((j) => j.job_id !== next.job_id)].slice(0, 12),
+                      [next, ...previous.filter((j) => j.job_id !== next.job_id)].slice(0, MAX_HISTORY),
                     );
                   });
                 }
@@ -351,7 +399,7 @@ export default function HomePage() {
               if (isTerminalJobStatus(next.status)) {
                 queueMicrotask(() => {
                   setHistory((previous) =>
-                    [next, ...previous.filter((j) => j.job_id !== next.job_id)].slice(0, 12),
+                    [next, ...previous.filter((j) => j.job_id !== next.job_id)].slice(0, MAX_HISTORY),
                   );
                 });
                 return prev.filter((j) => j.job_id !== id);
@@ -531,7 +579,7 @@ export default function HomePage() {
       setLoading(false);
       setGenerateSubmitting(false);
       if (isTerminalJobStatus(merged.status)) {
-        setHistory((previous) => [merged, ...previous.filter((j) => j.job_id !== merged.job_id)].slice(0, 12));
+        setHistory((previous) => [merged, ...previous.filter((j) => j.job_id !== merged.job_id)].slice(0, MAX_HISTORY));
       }
     } catch (error) {
       setErrorText((error as Error).message);
@@ -602,9 +650,11 @@ export default function HomePage() {
     setErrorText(null);
     setResearchPreviewSaveBusy(true);
     try {
-      const latest = await saveImageGenerationPreview(job.job_id, { researchDigest: researchSummaryDraft });
+      const latest = await saveImageGenerationPreview(job.job_id, {
+        researchBrief: researchBriefDraft,
+      });
       setJob(latest);
-      setResearchSummaryDraft(buildResearchSummaryMessage(latest));
+      setResearchBriefDraft(readResearchBrief(latest));
     } catch (error) {
       setErrorText((error as Error).message);
     } finally {
@@ -617,7 +667,7 @@ export default function HomePage() {
     setErrorText(null);
     setLoading(true);
     try {
-      await confirmImageGeneration(job.job_id, { researchDigest: researchSummaryDraft });
+      await confirmImageGeneration(job.job_id, { researchBrief: researchBriefDraft });
       const latest = await getJob(job.job_id);
       setJob(latest);
     } catch (error) {
@@ -808,8 +858,12 @@ export default function HomePage() {
   const awaitingImageGenPreview = job?.status === "awaiting_image_generation_preview";
   const researchSummaryDirty = useMemo(() => {
     if (!job || job.status !== "awaiting_image_generation_preview") return false;
-    return researchSummaryDraft.trim() !== buildResearchSummaryMessage(job).trim();
-  }, [job, researchSummaryDraft]);
+    const persisted = readResearchBrief(job);
+    for (const key of Object.keys(persisted) as Array<keyof typeof persisted>) {
+      if ((researchBriefDraft[key] ?? "").trim() !== persisted[key]) return true;
+    }
+    return false;
+  }, [job, researchBriefDraft]);
   const researchPhase = Boolean(job) && job!.status === "running" && job!.generation_phase === "brand_research";
   const awaitingImageGenPreviewEffective = !retroStep && awaitingImageGenPreview;
   const researchPhaseEffective = !retroStep && researchPhase;
@@ -957,7 +1011,7 @@ export default function HomePage() {
                       <div className="researchSummaryBanner" role="region" aria-label="Research summary">
                         <p className="researchSummaryBanner__label">Research summary</p>
                         <div className="researchSummaryBanner__body">
-                          {researchSummaryDraft.trim() || buildResearchSummaryMessage(job)}
+                          {digestFromBrief(researchBriefDraft).trim() || buildResearchSummaryMessage(job)}
                         </div>
                         <p className="researchSummaryBanner__hint">
                           Shown while reference images generate. Edits here do not apply mid-run.
@@ -994,7 +1048,7 @@ export default function HomePage() {
             </section>
           ) : null}
 
-          {downloads.length > 0 ? (
+          {!retroStep && downloads.length > 0 ? (
             <section className="panel panel--downloads">
               <h3 className="panel__h">Downloads</h3>
               <div className="downloadChips">
@@ -1004,6 +1058,13 @@ export default function HomePage() {
                   </a>
                 ))}
               </div>
+            </section>
+          ) : null}
+
+          {!retroStep && job?.files?.glb ? (
+            <section className="panel panel--downloads">
+              <h3 className="panel__h">Image views</h3>
+              <ModelViewAngleExport glbPath={job.files.glb} jobId={job.job_id} />
             </section>
           ) : null}
 
@@ -1078,8 +1139,8 @@ export default function HomePage() {
               {sortedConceptStyles.length > 0 ? (
                 <div className="conceptStylePicker" role="list" aria-label="Concept styles">
                   {sortedConceptStyles.map((row) => {
-                    const frontUrl = outputUrl(row.front);
-                    const tqUrl = outputUrl(row.three_quarter);
+                    const frontUrl = cloudinaryThumb(outputUrl(row.front), 320) ?? outputUrl(row.front);
+                    const tqUrl = cloudinaryThumb(outputUrl(row.three_quarter), 320) ?? outputUrl(row.three_quarter);
                     const isSelected = selectedConceptIndex === row.index;
                     const genIx = job?.concept_generation_style_index;
                     const isGeneratingRow = genIx === row.index;
@@ -1148,7 +1209,8 @@ export default function HomePage() {
                 <div className="conceptGrid">
                   {(["front", "three_quarter"] as const).map((key) => {
                     const path = job!.concept_references?.[key];
-                    const url = outputUrl(path);
+                    const raw = outputUrl(path);
+                    const url = cloudinaryOptimized(raw, 1000) ?? raw;
                     if (!url) return null;
                     return (
                       <figure key={key} className="conceptFig">
@@ -1163,60 +1225,54 @@ export default function HomePage() {
               )}
             </div>
           ) : awaitingImageGenPreviewEffective ? (
-            <div className="conceptStage">
+            <div className="conceptStage conceptStage--research">
               <header className="conceptStage__header">
-                <h2 className="conceptStage__title">Research & reference images</h2>
+                <p className="conceptStage__eyebrow">Step 1 · Research</p>
+                <h2 className="conceptStage__title">Research summary for this product</h2>
+                <p className="conceptStage__sub">
+                  This is what the image model sees before drawing. Review each card, edit anything that&rsquo;s off,
+                  then generate reference images.
+                </p>
+                {job!.company ? (
+                  <p className="conceptStage__company">
+                    <span className="conceptStage__companyLabel">Company</span>
+                    <span className="conceptStage__companyValue">{job!.company}</span>
+                  </p>
+                ) : null}
               </header>
-              {job!.company ? (
-                <p className="panel__muted" style={{ marginBottom: "0.75rem" }}>
-                  <strong>Company: </strong>
-                  {job!.company}
-                </p>
-              ) : null}
-              <div className="researchSummaryBanner" role="region" aria-label="Research summary">
-                <p className="researchSummaryBanner__label">Research summary</p>
-                <textarea
-                  className="researchSummaryBanner__textarea"
-                  id="research-summary-stage"
-                  value={researchSummaryDraft}
-                  onChange={(e) => setResearchSummaryDraft(e.target.value)}
-                  rows={12}
-                  maxLength={8000}
-                  spellCheck
-                  disabled={loading || researchPreviewSaveBusy}
-                  aria-describedby="research-summary-stage-hint"
-                />
-                <p className="researchSummaryBanner__hint" id="research-summary-stage-hint">
-                  Save to rebuild the full image prompts below. Generate reference images when you are ready to run the
-                  pipeline.
-                </p>
-                <div className="researchSummaryBanner__actions">
-                  <button
-                    type="button"
-                    className="button button--ghost"
-                    onClick={() => void onSaveResearchSummaryPreview()}
-                    disabled={loading || researchPreviewSaveBusy || !researchSummaryDirty}
-                  >
-                    {researchPreviewSaveBusy ? "Saving…" : "Save"}
-                  </button>
-                </div>
-              </div>
+              <ResearchSummaryEditor
+                brief={researchBriefDraft}
+                onChange={setResearchBriefDraft}
+                disabled={loading || researchPreviewSaveBusy}
+              />
               {job!.research_warnings && job!.research_warnings.length > 0 ? (
-                <p className="panel__fineprint" role="status" style={{ marginTop: "0.5rem" }}>
+                <p className="conceptStage__warnings" role="status">
                   {job!.research_warnings.join(" · ")}
                 </p>
               ) : null}
-              <div className="conceptStage__actions">
+              <div className="conceptStage__actions conceptStage__actions--research">
                 <button
                   type="button"
                   className="button button--primary"
                   onClick={() => void onConfirmImageGeneration()}
-                  disabled={loading}
+                  disabled={loading || researchPreviewSaveBusy}
                 >
                   {loading ? "Starting…" : "Generate reference images"}
                 </button>
+                <button
+                  type="button"
+                  className="button button--ghost"
+                  onClick={() => void onSaveResearchSummaryPreview()}
+                  disabled={loading || researchPreviewSaveBusy || !researchSummaryDirty}
+                >
+                  {researchPreviewSaveBusy
+                    ? "Saving…"
+                    : researchSummaryDirty
+                      ? "Save edits"
+                      : "Saved"}
+                </button>
                 <p className="conceptStage__actionsNote">
-                  Optional: expand the sections below for sources and the exact API prompt strings.
+                  Saving rebuilds the underlying image prompts. Sources and raw prompts are below.
                 </p>
               </div>
               {job!.research_sources && job!.research_sources.length > 0 ? (
@@ -1279,7 +1335,8 @@ export default function HomePage() {
               <div className="conceptGrid">
                 {(["front", "three_quarter"] as const).map((key) => {
                   const path = job!.concept_references?.[key];
-                  const url = outputUrl(path);
+                  const raw = outputUrl(path);
+                  const url = cloudinaryOptimized(raw, 1000) ?? raw;
                   if (url) {
                     return (
                       <figure key={key} className="conceptFig">
@@ -1374,8 +1431,8 @@ export default function HomePage() {
                   ? job
                   : null
               }
-              researchSummaryDraft={researchSummaryDraft}
-              onChangeResearchSummaryDraft={setResearchSummaryDraft}
+              researchBriefDraft={researchBriefDraft}
+              onChangeResearchBriefDraft={setResearchBriefDraft}
               onConfirmImagePreview={() => void onConfirmImageGeneration()}
               onSaveResearchSummaryPreview={() => void onSaveResearchSummaryPreview()}
               imagePreviewBusy={Boolean(loading && job?.status === "awaiting_image_generation_preview")}

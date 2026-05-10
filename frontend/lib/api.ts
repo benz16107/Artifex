@@ -155,6 +155,15 @@ export type ConceptStyleRow = {
   three_quarter?: string;
 };
 
+export type ResearchBriefField =
+  | "brand_snapshot"
+  | "visual_packaging_cues"
+  | "category_competitive_notes"
+  | "financial_snapshot"
+  | "corporate_strategy";
+
+export type ResearchBrief = Partial<Record<ResearchBriefField, string>>;
+
 export type JobPayload = {
   job_id: string;
   user_id?: string;
@@ -196,8 +205,11 @@ export type JobPayload = {
   meshy_target_formats?: string[] | null;
   research_digest?: string | null;
   research_sources?: Array<{ title: string; url: string; snippet?: string }>;
-  research_brief?: Record<string, string> | null;
+  research_brief?: ResearchBrief | null;
   research_warnings?: string[];
+  /** Populated when brand research used Backboard (optional observability). */
+  backboard_thread_id?: string | null;
+  backboard_assistant_id?: string | null;
   image_generation_preview?: ImageGenerationPreview | null;
 };
 
@@ -275,6 +287,23 @@ export async function getJob(jobId: string): Promise<JobPayload> {
     throw new Error(`Could not fetch job ${jobId}`);
   }
   return response.json();
+}
+
+/** Recent jobs from the server (newest first). Used to repopulate the gallery when localStorage is empty. */
+export async function listJobs(options?: { limit?: number }): Promise<JobPayload[]> {
+  const url = new URL(`${API_URL_ROOT}/jobs`);
+  if (options?.limit !== undefined) {
+    url.searchParams.set("limit", String(options.limit));
+  }
+  const response = await fetch(url.toString(), {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    throw new Error(`Could not fetch jobs (${response.status})`);
+  }
+  const body = (await response.json()) as { items?: JobPayload[] };
+  return Array.isArray(body.items) ? body.items : [];
 }
 
 export async function deleteJob(jobId: string): Promise<{ job_id: string; deleted: boolean }> {
@@ -363,11 +392,14 @@ export async function regenerate3dBuild(
 
 export async function confirmImageGeneration(
   jobId: string,
-  options?: { researchDigest?: string },
+  options?: { researchDigest?: string; researchBrief?: ResearchBrief },
 ): Promise<{ job_id: string; status: "queued" }> {
-  const body: { research_digest?: string } = {};
+  const body: { research_digest?: string; research_brief?: ResearchBrief } = {};
   if (options?.researchDigest !== undefined) {
     body.research_digest = options.researchDigest;
+  }
+  if (options?.researchBrief !== undefined) {
+    body.research_brief = options.researchBrief;
   }
   const response = await fetch(`${API_URL_ROOT}/jobs/${jobId}/confirm-image-generation`, {
     method: "POST",
@@ -385,12 +417,19 @@ export async function confirmImageGeneration(
 /** Persist edited research text and rebuild full image prompts without starting reference generation. */
 export async function saveImageGenerationPreview(
   jobId: string,
-  options: { researchDigest: string },
+  options: { researchDigest?: string; researchBrief?: ResearchBrief },
 ): Promise<JobPayload> {
+  const body: Record<string, unknown> = {};
+  if (options.researchDigest !== undefined) {
+    body.research_digest = options.researchDigest;
+  }
+  if (options.researchBrief !== undefined) {
+    body.research_brief = options.researchBrief;
+  }
   const response = await fetch(`${API_URL_ROOT}/jobs/${jobId}/save-image-generation-preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ research_digest: options.researchDigest }),
+    body: JSON.stringify(body),
     signal: fetchTimeoutSignal(),
   });
   if (!response.ok) {

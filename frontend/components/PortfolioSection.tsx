@@ -1,10 +1,15 @@
 "use client";
 
-import type { JobPayload } from "@/lib/api";
+import { useRef } from "react";
+
+import type { JobPayload, ResearchBrief } from "@/lib/api";
 import { outputUrl } from "@/lib/api";
 import { friendlyGenerationPhase, friendlyJobStatus, isTerminalJobStatus } from "@/lib/flow";
 import { jobPortfolioThumbUrl } from "@/lib/jobPortfolioThumb";
-import { buildResearchSummaryMessage } from "@/lib/researchSummary";
+import { useSyncModelViewerHostPixelSize } from "@/lib/modelViewerHostPixelSize";
+import { ResearchSummaryEditor } from "@/components/ResearchSummaryEditor";
+
+type PortfolioModelViewerHost = HTMLElement & { loaded?: boolean };
 
 type PortfolioSectionProps = {
   jobs: JobPayload[];
@@ -15,8 +20,8 @@ type PortfolioSectionProps = {
   onResumePipeline?: (job: JobPayload) => void;
   /** When the pipeline is minimized at research preview, confirm lives here instead of above the composer. */
   imagePreviewJob?: JobPayload | null;
-  researchSummaryDraft?: string;
-  onChangeResearchSummaryDraft?: (value: string) => void;
+  researchBriefDraft?: ResearchBrief;
+  onChangeResearchBriefDraft?: (value: ResearchBrief) => void;
   onConfirmImagePreview?: () => void;
   onSaveResearchSummaryPreview?: () => void;
   imagePreviewBusy?: boolean;
@@ -56,11 +61,19 @@ export function DeletePrototypeIcon() {
 
 function PortfolioLiveMedia({ job }: { job: JobPayload }) {
   const glbUrl = outputUrl(job.files?.glb);
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<PortfolioModelViewerHost | null>(null);
+
+  useSyncModelViewerHostPixelSize(frameRef, viewerRef, glbUrl ?? null);
+
   if (glbUrl) {
     return (
-      <div className="portfolioCard__viewerSlot" aria-label="Interactive 3D prototype preview">
+      <div className="portfolioCard__viewerSlot" ref={frameRef} aria-label="Interactive 3D prototype preview">
         {/* @ts-expect-error model-viewer is a custom element */}
         <model-viewer
+          ref={(el: PortfolioModelViewerHost | null) => {
+            viewerRef.current = el;
+          }}
           src={glbUrl}
           camera-controls
           auto-rotate
@@ -165,8 +178,8 @@ export function PortfolioSection({
   backgroundJobs = [],
   onResumePipeline,
   imagePreviewJob = null,
-  researchSummaryDraft = "",
-  onChangeResearchSummaryDraft,
+  researchBriefDraft,
+  onChangeResearchBriefDraft,
   onConfirmImagePreview,
   onSaveResearchSummaryPreview,
   imagePreviewBusy = false,
@@ -189,55 +202,22 @@ export function PortfolioSection({
         </p>
       </div>
 
-      {imagePreviewJob && onConfirmImagePreview ? (
+      {imagePreviewJob && onConfirmImagePreview && researchBriefDraft && onChangeResearchBriefDraft ? (
         <section
           className="homeLanding__researchPreview portfolioSection__researchPreview"
           aria-label="Research ready"
         >
-          <p className="homeLanding__researchPreviewEyebrow">Your prototype run</p>
-          <p className="homeLanding__researchPreviewPrompt">{imagePreviewJob.prompt}</p>
-          <div
-            className="researchSummaryBanner homeLanding__researchBanner"
-            role="region"
-            aria-label="Research summary"
-          >
-            <p className="researchSummaryBanner__label">Research summary</p>
-            {onChangeResearchSummaryDraft ? (
-              <>
-            <textarea
-              className="researchSummaryBanner__textarea"
-              id="research-summary-portfolio"
-              value={researchSummaryDraft}
-              onChange={(e) => onChangeResearchSummaryDraft(e.target.value)}
-              rows={10}
-              maxLength={8000}
-              spellCheck
-              disabled={imagePreviewBusy || researchPreviewSaveBusy}
-              aria-describedby="research-summary-portfolio-hint"
-            />
-                <p className="researchSummaryBanner__hint" id="research-summary-portfolio-hint">
-                  Save to rebuild the full image prompts in the pipeline. Generate reference images when you are ready
-                  to run.
-                </p>
-                {onSaveResearchSummaryPreview ? (
-                  <div className="researchSummaryBanner__actions">
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={onSaveResearchSummaryPreview}
-                      disabled={
-                        imagePreviewBusy || researchPreviewSaveBusy || !researchSummaryDirty
-                      }
-                    >
-                      {researchPreviewSaveBusy ? "Saving…" : "Save"}
-                    </button>
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <div className="researchSummaryBanner__body">{buildResearchSummaryMessage(imagePreviewJob)}</div>
-            )}
-          </div>
+          <header className="homeLanding__researchPreviewHead">
+            <p className="homeLanding__researchPreviewEyebrow">Your prototype run</p>
+            <p className="homeLanding__researchPreviewPrompt">{imagePreviewJob.prompt}</p>
+          </header>
+          <ResearchSummaryEditor
+            brief={researchBriefDraft}
+            onChange={onChangeResearchBriefDraft}
+            disabled={imagePreviewBusy || researchPreviewSaveBusy}
+            compact
+            eyebrow="Research summary"
+          />
           {imagePreviewJob.research_warnings && imagePreviewJob.research_warnings.length > 0 ? (
             <p className="homeLanding__researchPreviewNotes" role="status">
               {imagePreviewJob.research_warnings.join(" · ")}
@@ -252,6 +232,20 @@ export function PortfolioSection({
             >
               {imagePreviewBusy ? "Starting…" : "Generate reference images"}
             </button>
+            {onSaveResearchSummaryPreview ? (
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={onSaveResearchSummaryPreview}
+                disabled={imagePreviewBusy || researchPreviewSaveBusy || !researchSummaryDirty}
+              >
+                {researchPreviewSaveBusy
+                  ? "Saving…"
+                  : researchSummaryDirty
+                    ? "Save edits"
+                    : "Saved"}
+              </button>
+            ) : null}
             <p className="homeLanding__researchPreviewHint">
               Open the live pipeline tile below for sources and full prompts.
             </p>

@@ -13,6 +13,8 @@ from app.config import (
     DEFAULT_USER_ID,
     IMAGE_OPENAI_MODEL,
     IMAGE_OPENAI_MODEL_FAST,
+    JOB_METADATA_FILENAME,
+    OUTPUTS_DIR,
     QUEUE_BACKEND,
     STORAGE_BACKEND,
 )
@@ -52,35 +54,78 @@ from app.services.jobs import (
 from app.services.reference_images import build_reference_image_prompt_preview
 
 
+_RESEARCH_BRIEF_FIELDS: tuple[tuple[str, str], ...] = (
+    ("brand_snapshot", "Brand snapshot"),
+    ("visual_packaging_cues", "Visual & packaging cues"),
+    ("category_competitive_notes", "Category & market"),
+    ("financial_snapshot", "Financial signals → product implications"),
+    ("corporate_strategy", "Corporate strategy → product direction"),
+)
+
+
+def _digest_from_brief(brief: dict[str, str] | None) -> str:
+    """Render the structured brief as a single digest blob the image model can read."""
+    if not brief:
+        return ""
+    parts: list[str] = []
+    for key, label in _RESEARCH_BRIEF_FIELDS:
+        value = str(brief.get(key) or "").strip()
+        if not value:
+            continue
+        parts.append(f"{label}:\n{value}")
+    return "\n\n".join(parts).strip()
+
+
 def _apply_research_digest_to_image_preview(
     job_id: str,
     job: dict[str, Any],
     *,
     research_digest: str | None,
+    research_brief: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Rebuild persisted image prompt preview from edited research text (no queue)."""
+    """Rebuild persisted image prompt preview from edited research text (no queue).
+
+    Accepts either a free-form digest blob, a structured brief, or both. When a
+    brief is supplied, it becomes the source of truth and (if no explicit digest
+    is provided) the digest is rebuilt from the brief so the image model sees
+    every section, including financial signals and corporate strategy.
+    """
     use_fast = bool(job.get("fast_reference_images"))
     image_model = IMAGE_OPENAI_MODEL_FAST if use_fast else IMAGE_OPENAI_MODEL
+
+    normalized_brief: dict[str, str] | None = None
+    if research_brief is not None:
+        normalized_brief = {
+            key: str(research_brief.get(key) or "").strip()
+            for key, _label in _RESEARCH_BRIEF_FIELDS
+        }
+
+    digest_value = (research_digest or "").strip() or None
+    if digest_value is None and normalized_brief is not None:
+        derived = _digest_from_brief(normalized_brief)
+        digest_value = derived or None
+
     preview = build_reference_image_prompt_preview(
         prompt=job.get("prompt") or "",
         company=job.get("company"),
         documents=job.get("documents") or [],
-        research_digest=research_digest,
+        research_digest=digest_value,
         variation_detail_prompt=None,
         openai_image_model=image_model,
     )
-    return update_job(
-        job_id,
-        {
-            "research_digest": research_digest,
-            "research_brief": {
-                "brand_snapshot": "",
-                "visual_packaging_cues": "",
-                "category_competitive_notes": "",
-            },
-            "image_generation_preview": preview,
-        },
-    )
+
+    update_payload: dict[str, Any] = {
+        "research_digest": digest_value,
+        "image_generation_preview": preview,
+    }
+    if normalized_brief is not None:
+        update_payload["research_brief"] = normalized_brief
+    elif research_digest is not None:
+        update_payload["research_brief"] = {
+            key: "" for key, _label in _RESEARCH_BRIEF_FIELDS
+        }
+
+    return update_job(job_id, update_payload)
 from app.services.queue import (
     cancel_enqueued_job_if_possible,
     enqueue_add_concept_style,
@@ -198,10 +243,17 @@ def confirm_image_generation(request: HttpRequest, job_id: str) -> JsonResponse:
     except ValidationError as e:
         return JsonResponse({"detail": e.errors()}, status=422)
 
-    if "research_digest" in body:
+    if "research_digest" in body or "research_brief" in body:
         rd = (confirm_image_payload.research_digest or "").strip()
         digest_value = rd or None
-        _apply_research_digest_to_image_preview(job_id, job, research_digest=digest_value)
+        brief_payload = confirm_image_payload.research_brief
+        brief_value = brief_payload.model_dump() if brief_payload is not None else None
+        _apply_research_digest_to_image_preview(
+            job_id,
+            job,
+            research_digest=digest_value if "research_digest" in body else None,
+            research_brief=brief_value,
+        )
 
     enqueue_result = enqueue_confirm_image_generation(job_id)
     update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
@@ -235,7 +287,14 @@ def save_image_generation_preview(request: HttpRequest, job_id: str) -> JsonResp
         return JsonResponse({"detail": e.errors()}, status=422)
     rd = (payload.research_digest or "").strip()
     digest_value = rd or None
-    updated = _apply_research_digest_to_image_preview(job_id, job, research_digest=digest_value)
+    brief_payload = payload.research_brief
+    brief_value = brief_payload.model_dump() if brief_payload is not None else None
+    updated = _apply_research_digest_to_image_preview(
+        job_id,
+        job,
+        research_digest=digest_value if "research_digest" in body else None,
+        research_brief=brief_value,
+    )
     data = JobResponse.model_validate(updated).model_dump(mode="json")
     return JsonResponse(data, safe=False)
 
@@ -408,6 +467,120 @@ def regenerate_mesh(request: HttpRequest, job_id: str) -> JsonResponse:
     update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
     data = GenerateResponse(job_id=job_id, status="queued").model_dump(mode="json")
     return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def list_jobs(request: HttpRequest) -> JsonResponse:
+    """List recent jobs owned by the authenticated user (any status), newest first.
+
+    Used by the web client to recover the prototype gallery when localStorage is empty
+    or wiped (e.g. another browser, cleared site data, dev-server crash). The on-disk
+    metadata under OUTPUTS_DIR is the source of truth.
+    """
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    if not OUTPUTS_DIR.is_dir():
+        return JsonResponse({"items": []}, safe=False)
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    candidates: list[tuple[float, Path]] = []
+    for path in OUTPUTS_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        job_id = path.name
+        if not is_safe_job_id(job_id):
+            continue
+        if not (path / JOB_METADATA_FILENAME).is_file():
+            continue
+        candidates.append((_mtime(path), path))
+
+    items: list[dict[str, Any]] = []
+    try:
+        limit = int(request.GET.get("limit", "60"))
+    except (TypeError, ValueError):
+        limit = 60
+    limit = max(1, min(200, limit))
+
+    for _, path in sorted(candidates, key=lambda t: t[0], reverse=True):
+        job_id = path.name
+        job = read_job(job_id)
+        if not job:
+            continue
+        try:
+            _authorize_job_access(job, auth)
+        except PermissionError:
+            continue
+        try:
+            data = JobResponse.model_validate(job).model_dump(mode="json")
+        except ValidationError:
+            continue
+        items.append(data)
+        if len(items) >= limit:
+            break
+
+    return JsonResponse({"items": items}, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def list_viewer_models(request: HttpRequest) -> JsonResponse:
+    """List jobs under OUTPUTS_DIR that have model.glb and belong to the authenticated user (Quest viewer sync)."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    items: list[dict[str, Any]] = []
+    if not OUTPUTS_DIR.is_dir():
+        return JsonResponse({"items": []}, safe=False)
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    candidates: list[tuple[float, Path]] = []
+    for path in OUTPUTS_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        job_id = path.name
+        if not is_safe_job_id(job_id):
+            continue
+        if not (path / "model.glb").is_file():
+            continue
+        candidates.append((_mtime(path), path))
+
+    for _, path in sorted(candidates, key=lambda t: t[0], reverse=True):
+        job_id = path.name
+        job = read_job(job_id)
+        if not job:
+            continue
+        try:
+            _authorize_job_access(job, auth)
+        except PermissionError:
+            continue
+        prompt = (job.get("prompt") or "").strip().replace("\n", " ")
+        if len(prompt) > 120:
+            prompt = prompt[:117] + "..."
+        # camelCase keys: Unity JsonUtility deserializes this reliably on device.
+        items.append(
+            {
+                "jobId": job_id,
+                "status": job.get("status"),
+                "prompt": prompt,
+                "glbPath": f"/outputs/{job_id}/model.glb",
+            }
+        )
+        if len(items) >= 100:
+            break
+
+    return JsonResponse({"items": items}, safe=False)
 
 
 def get_job(request: HttpRequest, job_id: str) -> JsonResponse:

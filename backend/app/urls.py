@@ -16,6 +16,8 @@ urlpatterns = [
     path("composio/drive/browse", views_composio.composio_drive_browse),
     path("generate", views_api.generate),
     path("assets/analyze", views_api.analyze_assets),
+    path("viewer/models", views_api.list_viewer_models),
+    path("jobs", views_api.list_jobs),
     path("jobs/<str:job_id>", views_api.job_route),
     path("jobs/<str:job_id>/confirm-image-generation", views_api.confirm_image_generation),
     path("jobs/<str:job_id>/save-image-generation-preview", views_api.save_image_generation_preview),

@@ -3,7 +3,6 @@ using System.Collections;
 using System.IO;
 using System.Threading.Tasks;
 using GLTFast;
-using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
@@ -12,14 +11,15 @@ namespace Artifex.QuestViewer
 {
     /// <summary>
     /// Downloads a GLB from a URL (or loads StreamingAssets/test.glb) and instantiates it under <see cref="modelRoot"/>.
+    /// Uses Unity UI <see cref="Text"/> / <see cref="InputField"/> so the viewer does not depend on TMP essential resources.
     /// </summary>
     public sealed class GlbUrlLoadController : MonoBehaviour
     {
         private const string LastUrlKey = "ArtifexQuestViewer.LastGlbUrl";
 
-        [SerializeField] private TMP_InputField urlField;
+        [SerializeField] private InputField urlField;
         [SerializeField] private Button loadButton;
-        [SerializeField] private TMP_Text statusText;
+        [SerializeField] private Text statusText;
         [SerializeField] private Transform modelRoot;
         [SerializeField] private bool loadStreamingTestOnStart;
 
@@ -36,6 +36,36 @@ namespace Artifex.QuestViewer
             }
         }
 
+        /// <summary>Lets other UI (model list) reuse the same status line.</summary>
+        public void SetCatalogStatus(string message) => SetStatus(message);
+
+        /// <summary>Download and instantiate a GLB from a full http(s) URL (also updates the URL field and last-used prefs).</summary>
+        public void LoadRemoteUrl(string url)
+        {
+            var u = (url ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(u))
+            {
+                SetStatus("Empty URL.");
+                return;
+            }
+
+            if (!u.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                SetStatus("URL must start with http:// or https://");
+                return;
+            }
+
+            if (urlField != null)
+            {
+                urlField.text = u;
+            }
+
+            PlayerPrefs.SetString(LastUrlKey, u);
+            PlayerPrefs.Save();
+            StartCoroutine(DownloadAndLoadRoutine(u));
+        }
+
         private void Start()
         {
             if (loadStreamingTestOnStart)
@@ -49,18 +79,11 @@ namespace Artifex.QuestViewer
             var url = urlField != null ? urlField.text.Trim() : string.Empty;
             if (string.IsNullOrEmpty(url))
             {
-                SetStatus("Enter a URL.");
+                SetStatus("Enter a URL or pick a model from the list.");
                 return;
             }
 
-            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                SetStatus("URL must start with http:// or https://");
-                return;
-            }
-
-            StartCoroutine(DownloadAndLoadRoutine(url));
+            LoadRemoteUrl(url);
         }
 
         private IEnumerator DownloadAndLoadRoutine(string url)

@@ -993,6 +993,8 @@ def process_job(job_id: str, prompt: str) -> None:
             "brief": research.brief,
             "warnings": research.warnings,
             "tavily_results": research.tavily_results,
+            "backboard_thread_id": research.backboard_thread_id,
+            "backboard_assistant_id": research.backboard_assistant_id,
         }
         (output_dir / RESEARCH_JSON_FILENAME).write_text(json.dumps(research_record, indent=2))
 
@@ -1016,6 +1018,8 @@ def process_job(job_id: str, prompt: str) -> None:
                 "research_sources": research.sources,
                 "research_brief": research.brief,
                 "research_warnings": research.warnings,
+                "backboard_thread_id": research.backboard_thread_id,
+                "backboard_assistant_id": research.backboard_assistant_id,
                 "image_generation_preview": preview,
                 "spec": spec.model_dump(mode="json"),
                 "stage_durations_ms": stage_durations_ms,

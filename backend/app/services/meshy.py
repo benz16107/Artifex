@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import logging
 import time
 from pathlib import Path
 from urllib import error, request
 
-from app.config import MESHY_AI_MODEL, MESHY_API_KEY
+from app.config import MESHY_AI_MODEL, MESHY_API_KEY, MESHY_HTTP_RETRIES, MESHY_HTTP_TIMEOUT_SECONDS
 
 logger = logging.getLogger("object-first-mvp")
 
@@ -27,6 +28,74 @@ _MESHY_OUTPUT_FILENAMES: dict[str, str] = {
 
 class MeshyError(Exception):
     pass
+
+
+def _retryable_meshy_url_error(exc: error.URLError) -> bool:
+    r = exc.reason
+    if isinstance(r, TimeoutError):
+        return True
+    if isinstance(r, (BrokenPipeError, ConnectionResetError)):
+        return True
+    if isinstance(r, OSError) and getattr(r, "errno", None) in {
+        errno.ETIMEDOUT,
+        errno.ECONNRESET,
+        errno.EPIPE,
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+        errno.ECONNABORTED,
+    }:
+        return True
+    return False
+
+
+def _meshy_http_read(req: request.Request, *, context: str) -> bytes:
+    """GET/POST with retries for transient network errors and retryable HTTP status codes."""
+    attempts = max(1, 1 + max(0, MESHY_HTTP_RETRIES))
+    backoff_s = 2.0
+    timeout = float(MESHY_HTTP_TIMEOUT_SECONDS)
+    for attempt in range(attempts):
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                return response.read()
+        except error.HTTPError as exc:
+            code = getattr(exc, "code", 0) or 0
+            if code in (408, 429, 500, 502, 503, 504) and attempt < attempts - 1:
+                logger.warning(
+                    "meshy_http_retry context=%s attempt=%s/%s http=%s",
+                    context,
+                    attempt + 1,
+                    attempts,
+                    code,
+                )
+                time.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2.0, 60.0)
+                continue
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = str(exc)
+            raise MeshyError(f"Meshy {context} failed: HTTP {code}: {detail}") from exc
+        except error.URLError as exc:
+            if attempt < attempts - 1 and _retryable_meshy_url_error(exc):
+                logger.warning(
+                    "meshy_http_retry context=%s attempt=%s/%s reason=%r",
+                    context,
+                    attempt + 1,
+                    attempts,
+                    exc.reason,
+                )
+                time.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2.0, 60.0)
+                continue
+            hint = ""
+            if _retryable_meshy_url_error(exc):
+                hint = (
+                    " Transient errors persisted after "
+                    f"{attempts} attempt(s) (per-attempt timeout {MESHY_HTTP_TIMEOUT_SECONDS}s). "
+                    "Try MESHY_HTTP_TIMEOUT_SECONDS=180 or MESHY_HTTP_RETRIES=6; check VPN/firewall and api.meshy.ai reachability."
+                )
+            raise MeshyError(f"Meshy {context} failed (network): {exc}{hint}") from exc
+    raise MeshyError(f"Meshy {context} failed after retries.")  # pragma: no cover
 
 
 def normalize_meshy_target_formats(formats: list[str] | None) -> list[str]:
@@ -79,16 +148,12 @@ def create_image_to_3d_task(*, image_path: Path, target_formats: list[str]) -> s
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=120) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except error.URLError as exc:
-        raise MeshyError(f"Meshy create task failed (network): {exc}") from exc
-    except error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            detail = str(exc)
-        raise MeshyError(f"Meshy create task failed: HTTP {getattr(exc, 'code', '?')}: {detail}") from exc
+        raw = _meshy_http_read(req, context="create task")
+        body = json.loads(raw.decode("utf-8"))
+    except MeshyError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise MeshyError(f"Meshy create task returned invalid JSON: {exc}") from exc
     task_id = body.get("result")
     if not task_id:
         raise MeshyError("Meshy create task did not return a task id.")
@@ -104,11 +169,11 @@ def get_task(task_id: str) -> dict:
         headers={"Authorization": f"Bearer {MESHY_API_KEY}"},
         method="GET",
     )
+    raw = _meshy_http_read(req, context="task status")
     try:
-        with request.urlopen(req, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.URLError as exc:
-        raise MeshyError(f"Meshy task status request failed (network): {exc}") from exc
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MeshyError(f"Meshy task status returned invalid JSON: {exc}") from exc
 
 
 def wait_for_task(task_id: str, *, timeout_seconds: int = 900, poll_seconds: float = 3.0) -> dict:
@@ -138,11 +203,7 @@ def wait_for_task(task_id: str, *, timeout_seconds: int = 900, poll_seconds: flo
 
 def download_to(url: str, path: Path) -> None:
     req = request.Request(url, method="GET")
-    try:
-        with request.urlopen(req, timeout=120) as response:
-            path.write_bytes(response.read())
-    except error.URLError as exc:
-        raise MeshyError(f"Meshy asset download failed (network): {exc}") from exc
+    path.write_bytes(_meshy_http_read(req, context="asset download"))
 
 
 def run_image_to_3d(*, image_path: Path, output_dir: Path, target_formats: list[str] | None = None) -> dict[str, Path]:

@@ -66,6 +66,8 @@ NEXT_PUBLIC_USER_ID=<user-id>
 
 - `POST /generate` -> create async generation job (reference images, then pause for confirmation)
 - `POST /jobs/{job_id}/confirm-concept` -> continue with Meshy exports
+- `POST /jobs/{job_id}/regenerate-concept` -> re-run reference images while awaiting review (same `spec.json`)
+- `POST /jobs/{job_id}/regenerate-3d` -> re-run Meshy from saved `reference_front.png` after `completed` or `failed` (JSON body optional: `target_formats`, same as confirm-concept)
 - `GET /jobs/{job_id}` -> poll job status and fetch file URLs
 - `POST /jobs/{job_id}/cancel` -> request cancellation for queued/running jobs
 - `GET /outputs/{job_id}/{filename}` -> download artifacts
@@ -74,8 +76,8 @@ NEXT_PUBLIC_USER_ID=<user-id>
 
 ## Notes
 
-- Prompt parsing supports `SPEC_PARSER_MODE=auto|llm|rule` (defaults to `auto`).
-- For LLM parsing, set `OPENAI_API_KEY` (optional `OPENAI_MODEL`, default `gpt-4o-mini`).
+- Prompt parsing uses the LLM when `OPENAI_API_KEY` is set, and falls back to simple heuristics if the call fails or the key is missing.
+- Set `OPENAI_API_KEY` (optional `OPENAI_MODEL`, default `gpt-4o-mini`) for LLM-backed parsing.
 - To use a non-OpenAI provider (including self-hosted open-source models) via an OpenAI-compatible API, set `OPENAI_BASE_URL`.
   - Example (DeepSeek hosted): `OPENAI_BASE_URL=https://api.deepseek.com`
   - Example (local Ollama): `OPENAI_BASE_URL=http://localhost:11434/v1` (and set `OPENAI_MODEL` to a local model id)

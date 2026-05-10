@@ -31,7 +31,6 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=https://api.deepseek.com
       - OPENAI_MODEL=deepseek-chat
-      - SPEC_PARSER_MODE=auto
     volumes:
       - ./outputs:/app/outputs
     depends_on:

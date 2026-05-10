@@ -23,7 +23,6 @@ MANIFEST_FILENAME = "manifest.json"
 GENERATION_TIMEOUT_SECONDS = int(os.getenv("GENERATION_TIMEOUT_SECONDS", "45"))
 GENERATION_MAX_RETRIES = int(os.getenv("GENERATION_MAX_RETRIES", "1"))
 
-SPEC_PARSER_MODE = os.getenv("SPEC_PARSER_MODE", "auto")  # auto | llm | rule
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_RAW = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
@@ -42,6 +41,11 @@ else:
     OPENAI_MODEL = OPENAI_MODEL_RAW
 SPEC_LLM_TIMEOUT_SECONDS = int(os.getenv("SPEC_LLM_TIMEOUT_SECONDS", "20"))
 SPEC_LLM_MAX_RETRIES = int(os.getenv("SPEC_LLM_MAX_RETRIES", "1"))
+# Reference file analysis (vision + PDF file parts): larger payloads and slower than spec JSON.
+ASSET_ANALYSIS_LLM_TIMEOUT_SECONDS = int(
+    os.getenv("ASSET_ANALYSIS_LLM_TIMEOUT_SECONDS", "180")
+)
+ASSET_ANALYSIS_LLM_MAX_RETRIES = int(os.getenv("ASSET_ANALYSIS_LLM_MAX_RETRIES", "1"))
 
 # Concept pipeline: image reference + image->3D
 # Reference images use OpenAI Images: /v1/images/generations (typically api.openai.com).
@@ -68,6 +72,8 @@ else:
     IMAGE_OPENAI_API_KEY = None
 
 IMAGE_OPENAI_MODEL = os.getenv("IMAGE_OPENAI_MODEL", "gpt-image-1")
+# Used when the client requests fast reference-image generation (POST /generate fast_reference_images=true).
+IMAGE_OPENAI_MODEL_FAST = os.getenv("IMAGE_OPENAI_MODEL_FAST", "gpt-image-1-mini")
 # Optional: GPT image model id for /v1/images/edits three-quarter view when IMAGE_OPENAI_MODEL is DALL-E (no image edits).
 IMAGE_OPENAI_EDIT_MODEL = (os.getenv("IMAGE_OPENAI_EDIT_MODEL") or "").strip() or None
 _default_openai_image_host = "https://api.openai.com"
@@ -79,6 +85,9 @@ else:
     IMAGE_OPENAI_BASE_URL = _default_openai_image_host
 MESHY_API_KEY = os.getenv("MESHY_API_KEY")
 MESHY_AI_MODEL = os.getenv("MESHY_AI_MODEL", "latest")
+# Meshy OpenAPI (create task, poll status, asset URLs): retries + per-attempt socket read timeout.
+MESHY_HTTP_TIMEOUT_SECONDS = int(os.getenv("MESHY_HTTP_TIMEOUT_SECONDS", "120"))
+MESHY_HTTP_RETRIES = int(os.getenv("MESHY_HTTP_RETRIES", "4"))
 # GPT image models often exceed 60s; short timeouts surface as flaky failures while long hangs look "stuck".
 CONCEPT_IMAGE_HTTP_TIMEOUT_SECONDS = int(os.getenv("CONCEPT_IMAGE_HTTP_TIMEOUT_SECONDS", "360"))
 # Retries for connect/read timeouts and transient 5xx/429 from the image host.

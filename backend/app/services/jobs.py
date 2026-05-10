@@ -32,6 +32,7 @@ def create_job(
     mode: str | None = None,
     company: str | None = None,
     documents: list[str] | None = None,
+    fast_reference_images: bool = False,
 ) -> dict[str, Any]:
     job_id = f"job_{uuid.uuid4().hex[:10]}"
     path = _job_dir(job_id)
@@ -44,6 +45,7 @@ def create_job(
         "mode": mode or "concept",
         "company": company,
         "documents": documents or [],
+        "fast_reference_images": bool(fast_reference_images),
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
         "spec": None,

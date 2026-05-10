@@ -10,6 +10,13 @@ from pydantic import ValidationError
 
 from app.config import API_AUTH_TOKEN, DEFAULT_USER_ID, QUEUE_BACKEND, STORAGE_BACKEND
 from app.services import composio_context
+from app.services.asset_analysis import (
+    AssetAnalysisError,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+    UploadedAsset,
+    analyze_uploaded_assets,
+)
 from app.schemas.api import (
     CancelJobResponse,
     ConfirmConceptRequest,
@@ -17,11 +24,13 @@ from app.schemas.api import (
     GenerateResponse,
     JobResponse,
 )
-from app.services.jobs import create_job, read_job, request_cancel, update_job
+from app.services.jobs import create_job, job_output_dir, read_job, request_cancel, update_job
 from app.services.queue import (
     cancel_enqueued_job_if_possible,
     enqueue_continue_concept,
     enqueue_generate_prompt,
+    enqueue_regenerate_concept_references,
+    enqueue_regenerate_mesh,
     queue_readiness,
 )
 from app.services.storage import get_storage_backend
@@ -79,11 +88,6 @@ def ready(request: HttpRequest) -> JsonResponse:
     )
 
 
-@require_http_methods(["GET"])
-def sample_prompts(request: HttpRequest) -> JsonResponse:
-    return JsonResponse({"prompts": []})
-
-
 @csrf_exempt
 @require_http_methods(["POST"])
 def generate(request: HttpRequest) -> JsonResponse:
@@ -103,6 +107,7 @@ def generate(request: HttpRequest) -> JsonResponse:
         user_id=auth,
         company=payload.company,
         documents=payload.documents,
+        fast_reference_images=payload.fast_reference_images,
     )
     enqueue_result = enqueue_generate_prompt(job["job_id"], payload.prompt)
     update_job(job["job_id"], {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
@@ -140,6 +145,60 @@ def confirm_concept(request: HttpRequest, job_id: str) -> JsonResponse:
     return JsonResponse(data, safe=False)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+def regenerate_concept_references(request: HttpRequest, job_id: str) -> JsonResponse:
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "awaiting_concept_confirmation":
+        return _json_error("Regenerate concept art is only available while reference images are awaiting review.", 409)
+    enqueue_result = enqueue_regenerate_concept_references(job_id)
+    update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
+    data = GenerateResponse(job_id=job_id, status="queued").model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def regenerate_mesh(request: HttpRequest, job_id: str) -> JsonResponse:
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") not in {"completed", "failed"}:
+        return _json_error("Regenerate 3D is only available after a mesh build has finished or failed.", 409)
+    output_dir = job_output_dir(job_id)
+    if not (output_dir / "reference_front.png").exists():
+        return _json_error("Missing concept reference image on disk; cannot rebuild the mesh.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        regen_payload = ConfirmConceptRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+    update_job(job_id, {"meshy_target_formats": regen_payload.target_formats})
+    enqueue_result = enqueue_regenerate_mesh(job_id)
+    update_job(job_id, {"queue": {"backend": enqueue_result.backend, "task_id": enqueue_result.task_id}})
+    data = GenerateResponse(job_id=job_id, status="queued").model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
 @require_http_methods(["GET"])
 def get_job(request: HttpRequest, job_id: str) -> JsonResponse:
     auth = _authenticate_or_response(request)
@@ -154,6 +213,70 @@ def get_job(request: HttpRequest, job_id: str) -> JsonResponse:
         return _json_error("Forbidden: job owned by another user", 403)
     data = JobResponse.model_validate(job).model_dump(mode="json")
     return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def analyze_assets(request: HttpRequest) -> JsonResponse:
+    """Analyze uploaded reference files and return text sections to merge into context documents."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    files = request.FILES.getlist("files")
+    if not files:
+        return _json_error("Upload at least one file under the 'files' form field.", 400)
+    if len(files) > MAX_FILES:
+        return _json_error(
+            f"Too many files: {len(files)} (max {MAX_FILES} per request).", 413
+        )
+    roles_raw = (request.POST.get("roles_json") or "").strip()
+    roles: list[str] = []
+    if roles_raw:
+        try:
+            parsed = json.loads(roles_raw)
+        except json.JSONDecodeError:
+            return _json_error("roles_json must be a JSON array of strings.", 400)
+        if not isinstance(parsed, list):
+            return _json_error("roles_json must be a JSON array.", 400)
+        roles = [str(x).strip().lower() for x in parsed]
+        if len(roles) != len(files):
+            return _json_error("roles_json must have one entry per uploaded file.", 400)
+        for r in roles:
+            if r not in ("reference", "sketch"):
+                return _json_error("Each role must be 'reference' or 'sketch'.", 400)
+    else:
+        roles = ["reference"] * len(files)
+
+    total = 0
+    assets: list[UploadedAsset] = []
+    for i, f in enumerate(files):
+        size = getattr(f, "size", None) or 0
+        total += size
+        if total > MAX_TOTAL_BYTES:
+            return _json_error(
+                f"Combined upload exceeds the {MAX_TOTAL_BYTES // (1024 * 1024)} MB request limit.",
+                413,
+            )
+        try:
+            data = f.read()
+        finally:
+            try:
+                f.seek(0)
+            except Exception:
+                pass
+        assets.append(
+            UploadedAsset(
+                filename=getattr(f, "name", "") or "file",
+                content_type=(getattr(f, "content_type", "") or "").lower(),
+                data=data,
+                role=roles[i],
+            )
+        )
+    try:
+        sections, warnings = analyze_uploaded_assets(assets)
+    except AssetAnalysisError as exc:
+        return _json_error(str(exc), exc.http_status)
+    return JsonResponse({"sections": sections, "warnings": warnings}, safe=False)
 
 
 @csrf_exempt

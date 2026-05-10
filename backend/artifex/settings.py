@@ -52,3 +52,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+# Large reference assets (images/PDFs); must be >= app MAX_TOTAL_BYTES for /assets/analyze.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 104 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 104 * 1024 * 1024

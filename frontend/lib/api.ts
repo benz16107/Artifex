@@ -168,11 +168,26 @@ export type JobPayload = {
   queue?: Record<string, string | null>;
   generation_phase?: string | null;
   concept_references?: Record<string, string> | null;
+  fast_reference_images?: boolean;
+  /** Server job metadata update time (ISO8601); used when merging polls after regenerate. */
+  updated_at?: string | null;
+  /** Last Meshy export formats from confirm or regenerate-3d. */
+  meshy_target_formats?: string[] | null;
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
 const USER_ID = process.env.NEXT_PUBLIC_USER_ID;
+
+const FETCH_TIMEOUT_MS = 180_000;
+
+/** Avoid hung UI when the API never responds (wrong host, VPN, stalled worker). */
+function fetchTimeoutSignal(): AbortSignal | undefined {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  }
+  return undefined;
+}
 
 function authHeaders(): HeadersInit {
   const headers: Record<string, string> = {};
@@ -181,11 +196,17 @@ function authHeaders(): HeadersInit {
   return headers;
 }
 
-export async function generate(prompt: string): Promise<{ job_id: string; status: "queued" }> {
+export async function generate(
+  prompt: string,
+  options?: { fastReferenceImages?: boolean },
+): Promise<{ job_id: string; status: "queued" }> {
   const response = await fetch(`${API_URL}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({
+      prompt,
+      fast_reference_images: Boolean(options?.fastReferenceImages),
+    }),
   });
   if (!response.ok) {
     throw new Error(`Generate request failed (${response.status})`);
@@ -197,14 +218,17 @@ export async function generateEnterprise(args: {
   prompt: string;
   company?: string;
   documents?: string[];
+  fastReferenceImages?: boolean;
 }): Promise<{ job_id: string; status: "queued" }> {
   const response = await fetch(`${API_URL}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
+    signal: fetchTimeoutSignal(),
     body: JSON.stringify({
       prompt: args.prompt,
       company: args.company,
       documents: args.documents ?? [],
+      fast_reference_images: Boolean(args.fastReferenceImages),
     }),
   });
   if (!response.ok) {
@@ -224,16 +248,36 @@ export async function getJob(jobId: string): Promise<JobPayload> {
   return response.json();
 }
 
-export async function getSamplePrompts(): Promise<string[]> {
-  const response = await fetch(`${API_URL}/sample-prompts`, {
-    cache: "no-store",
-    headers: authHeaders(),
+export async function regenerateConceptArt(jobId: string): Promise<{ job_id: string; status: "queued" }> {
+  const response = await fetch(`${API_URL}/jobs/${jobId}/regenerate-concept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: "{}",
   });
   if (!response.ok) {
-    return [];
+    const detail = await response.text();
+    throw new Error(`Regenerate concept art failed (${response.status}): ${detail}`);
   }
-  const data = (await response.json()) as { prompts: string[] };
-  return data.prompts;
+  return response.json();
+}
+
+export async function regenerate3dBuild(
+  jobId: string,
+  options?: { targetFormats?: string[] },
+): Promise<{ job_id: string; status: "queued" }> {
+  const target_formats = options?.targetFormats?.length
+    ? options.targetFormats
+    : ["glb"];
+  const response = await fetch(`${API_URL}/jobs/${jobId}/regenerate-3d`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ target_formats }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Regenerate 3D failed (${response.status}): ${detail}`);
+  }
+  return response.json();
 }
 
 export async function confirmConcept(
@@ -402,6 +446,47 @@ export async function postComposioFetch(body: {
       }
     } catch {
       /* use msg */
+    }
+    throw new Error(msg);
+  }
+  return response.json();
+}
+
+export type AnalyzeAssetRole = "reference" | "sketch";
+
+export async function postAnalyzeAssets(
+  files: File[],
+  options?: { roles?: AnalyzeAssetRole[]; signal?: AbortSignal },
+): Promise<{ sections: string[]; warnings: string[] }> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file, file.name);
+  }
+  if (options?.roles && options.roles.length === files.length) {
+    formData.append("roles_json", JSON.stringify(options.roles));
+  }
+  const headers: Record<string, string> = { ...authHeaders() } as Record<string, string>;
+  // Don't set Content-Type; the browser sets the correct multipart boundary.
+  /** Caller-supplied signal (e.g. user cancel) takes precedence so abort is not masked by timeout. */
+  const signal = options?.signal ?? fetchTimeoutSignal();
+  const response = await fetch(`${API_URL}/assets/analyze`, {
+    method: "POST",
+    headers,
+    signal,
+    body: formData,
+  });
+  if (!response.ok) {
+    const raw = await response.text();
+    let msg = raw || `Asset analysis failed (${response.status})`;
+    try {
+      const parsed = JSON.parse(raw) as { detail?: unknown };
+      if (Array.isArray(parsed.detail)) {
+        msg = JSON.stringify(parsed.detail);
+      } else if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        msg = parsed.detail.trim();
+      }
+    } catch {
+      /* use msg as-is */
     }
     throw new Error(msg);
   }

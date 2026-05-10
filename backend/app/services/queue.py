@@ -5,7 +5,12 @@ from threading import Thread
 
 from app.config import QUEUE_BACKEND, REDIS_URL, RQ_QUEUE_NAME
 from app.services.jobs import read_job
-from app.services.worker import continue_concept_job, process_job
+from app.services.worker import (
+    continue_concept_job,
+    process_job,
+    regenerate_concept_references_job,
+    regenerate_mesh_job,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,20 @@ def enqueue_continue_concept(job_id: str) -> EnqueueResult:
     if QUEUE_BACKEND == "rq":
         return _enqueue_rq("app.services.worker.continue_concept_job", job_id)
     Thread(target=continue_concept_job, args=(job_id,), daemon=True).start()
+    return EnqueueResult(backend="inline")
+
+
+def enqueue_regenerate_concept_references(job_id: str) -> EnqueueResult:
+    if QUEUE_BACKEND == "rq":
+        return _enqueue_rq("app.services.worker.regenerate_concept_references_job", job_id)
+    Thread(target=regenerate_concept_references_job, args=(job_id,), daemon=True).start()
+    return EnqueueResult(backend="inline")
+
+
+def enqueue_regenerate_mesh(job_id: str) -> EnqueueResult:
+    if QUEUE_BACKEND == "rq":
+        return _enqueue_rq("app.services.worker.regenerate_mesh_job", job_id)
+    Thread(target=regenerate_mesh_job, args=(job_id,), daemon=True).start()
     return EnqueueResult(backend="inline")
 
 

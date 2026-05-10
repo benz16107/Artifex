@@ -6,15 +6,13 @@ export function isTerminalJobStatus(status: JobStatus): boolean {
 }
 
 export function getFlowStep(job: JobPayload | null): FlowStepId {
-  if (!job) return "describe";
+  if (!job) return "references";
   if (job.status === "completed") return "export";
   if (job.status === "failed" || job.status === "cancelled") {
     if (job.files?.glb) return "export";
     const gp = (job.generation_phase ?? "").toLowerCase();
     if (gp.includes("image_to_3d") || gp.includes("to_3d")) return "mesh";
-    const hasRefs = job.concept_references && Object.keys(job.concept_references).length > 0;
-    if (hasRefs) return "references";
-    return "describe";
+    return "references";
   }
   if (job.status === "awaiting_concept_confirmation") return "references";
   if (job.status === "queued" || job.status === "running") {
@@ -22,7 +20,7 @@ export function getFlowStep(job: JobPayload | null): FlowStepId {
     if (gp.includes("image_to_3d") || gp.includes("to_3d")) return "mesh";
     return "references";
   }
-  return "describe";
+  return "references";
 }
 
 export function friendlyJobStatus(status: JobStatus): string {

@@ -24,6 +24,8 @@ class GenerateRequest(BaseModel):
     # Supporting context (strategy docs, annual report excerpts, etc).
     # Keep as plain text for MVP; the client can concatenate or chunk.
     documents: list[str] = Field(default_factory=list, max_length=12)
+    # When true, reference images use IMAGE_OPENAI_MODEL_FAST instead of IMAGE_OPENAI_MODEL.
+    fast_reference_images: bool = False
 
 
 class ConfirmConceptRequest(BaseModel):
@@ -70,6 +72,7 @@ class JobResponse(BaseModel):
     user_id: str = "anonymous"
     status: JobStatus
     prompt: str
+    fast_reference_images: bool = False
     # Concept pipeline sub-step (cleared when the job finishes).
     generation_phase: str | None = None
     # Populated when status is awaiting_concept_confirmation (view key -> URL path or absolute URL).
@@ -81,6 +84,10 @@ class JobResponse(BaseModel):
     stage_durations_ms: dict[str, int] = Field(default_factory=dict)
     cancel_requested: bool = False
     queue: dict[str, str | None] = Field(default_factory=dict)
+    # ISO8601; used by clients to merge poll state after regenerate flows.
+    updated_at: str | None = None
+    # Last Meshy export formats chosen at confirm (or regenerate-3d); not always present on older jobs.
+    meshy_target_formats: list[str] | None = None
 
 
 class GenerateResponse(BaseModel):

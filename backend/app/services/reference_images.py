@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib import error, request
 
@@ -17,9 +18,11 @@ from app.config import (
     IMAGE_OPENAI_MODEL,
     OPENAI_BASE_URL,
 )
-from app.schemas.spec import ProductSpec
-
 logger = logging.getLogger("object-first-mvp")
+
+
+class ReferenceImageAPIError(Exception):
+    """OpenAI image HTTP/network failures (distinct from invalid user spec)."""
 
 
 def _dalle_model_requests_response_format(model: str) -> bool:
@@ -36,9 +39,17 @@ def _model_supports_reference_image_edits(model: str) -> bool:
     return m.startswith("gpt-image") or m.startswith("chatgpt-image")
 
 
-def _three_quarter_edit_model() -> str | None:
+def _edit_model_accepts_high_input_fidelity(model: str) -> bool:
+    """gpt-image-1-mini rejects input_fidelity=high (invalid_input_fidelity_model)."""
+    m = (model or "").strip().lower()
+    if not m or "mini" in m:
+        return False
+    return m.startswith("gpt-image") or m.startswith("chatgpt-image")
+
+
+def _three_quarter_edit_model(primary_model: str) -> str | None:
     """Model used for image-conditioned three-quarter; None falls back to a second text generation."""
-    primary = (IMAGE_OPENAI_MODEL or "").strip()
+    primary = (primary_model or "").strip()
     if _model_supports_reference_image_edits(primary):
         return primary
     alt = (IMAGE_OPENAI_EDIT_MODEL or "").strip()
@@ -52,14 +63,25 @@ def _png_data_url(image_bytes: bytes) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-_THREE_QUARTER_FROM_FRONT_PROMPT = (
-    "The input image is the canonical straight-on front view of one physical product. "
-    "Produce a new studio photograph of the exact same object from a three-quarter angle "
-    "(front-right), with a modest downward tilt, centered, neutral soft-gray or white backdrop. "
-    "Preserve the product identity precisely: same geometry, proportions, materials, colors, "
-    "labels, logos, surface finish, and every visible detail. Do not redesign, replace, or "
-    "approximate a similar item—only rotate the camera. No people, hands, or new text overlays."
+_THREE_QUARTER_CAMERA_DIRECTIVE = (
+    "The input image is the canonical straight-on front view of one physical product and is the "
+    "primary visual reference for geometry, proportions, silhouette, materials, colors, labels, "
+    "logos, and surface finish. Produce a new studio photograph of the exact same object from a "
+    "three-quarter angle (front-right), with a modest downward tilt, centered, neutral soft-gray "
+    "or white backdrop. Do not redesign, replace, or approximate a similar item—only rotate the "
+    "camera. No people, hands, or new text overlays. "
+    "However, the user's written product description and brand/context blocks above are authoritative: "
+    "if any details they describe (e.g. side/top/back features, vents, ports, hinges, seams, "
+    "graphics, materials, or color regions) are not visible or are ambiguous in the front "
+    "reference image, faithfully render them in the three-quarter view in a way that is fully "
+    "consistent with the front image's shape, scale, and finish. Treat the front image as the "
+    "ground truth for what is shown, and the written description and context as the ground truth "
+    "for what exists on the object as a whole."
 )
+
+
+def _three_quarter_edit_prompt(shared_context: str) -> str:
+    return f"{shared_context} {_THREE_QUARTER_CAMERA_DIRECTIVE}"
 
 
 def _image_bytes_from_response_item(
@@ -73,7 +95,7 @@ def _image_bytes_from_response_item(
         return base64.b64decode(b64)
     img_url = item.get("url")
     if not img_url:
-        raise ValueError(
+        raise ReferenceImageAPIError(
             "Image API returned no b64_json or url in data[0]. "
             "Check IMAGE_OPENAI_MODEL and API response shape."
         )
@@ -168,10 +190,10 @@ def _post_openai_images_json(
                 )
                 if OPENAI_BASE_URL and "openai.com" not in OPENAI_BASE_URL.lower():
                     hint += f" Your LLM uses OPENAI_BASE_URL={OPENAI_BASE_URL} — keep that for chat only."
-                raise ValueError(
+                raise ReferenceImageAPIError(
                     f"Reference image API failed: HTTP {code}: {detail}{hint}"
                 ) from exc
-            raise ValueError(f"Reference image API failed: HTTP {code}: {detail}") from exc
+            raise ReferenceImageAPIError(f"Reference image API failed: HTTP {code}: {detail}") from exc
         except error.URLError as exc:
             if attempt < attempts - 1 and _retryable_url_error(exc):
                 logger.warning(
@@ -195,42 +217,9 @@ def _post_openai_images_json(
                 hint = (
                     " Check IMAGE_OPENAI_BASE_URL, TLS or proxy settings, and that the host is reachable from this machine."
                 )
-            raise ValueError(
+            raise ReferenceImageAPIError(
                 f"Reference image API failed: network error reaching image host: {exc!r}.{hint}"
             ) from exc
-
-
-def _design_lock_from_spec(spec: ProductSpec) -> str:
-    """Compact, stable JSON the model can treat as a single source of truth for both views."""
-    payload = {
-        "object_type": spec.object_type,
-        "product_name": spec.product_name,
-        "dimensions_mm": {
-            "L": round(spec.dimensions.length_mm, 2),
-            "W": round(spec.dimensions.width_mm, 2),
-            "H": round(spec.dimensions.height_mm, 2),
-        },
-        "shape": spec.shape.model_dump(),
-        "materials": spec.materials.model_dump(),
-        "colors": spec.colors,
-        "features": spec.features[:24],
-        "components": [c.model_dump() for c in spec.components],
-        "engraving": spec.engraving.model_dump() if spec.engraving else None,
-        "concept": spec.concept.model_dump(),
-        "brand": {
-            "company": spec.brand.company,
-            "brand_keywords": spec.brand.brand_keywords[:20],
-            "tone": spec.brand.tone,
-        },
-    }
-    blob = json.dumps(payload, separators=(",", ":"), default=str)
-    max_len = 4500
-    if len(blob) > max_len:
-        blob = blob[:max_len] + "..."
-    return (
-        "AUTHORITATIVE PRODUCT SPEC (immutable across both images; do not reinterpret or redesign): "
-        + blob
-    )
 
 
 def _shared_reference_context(
@@ -238,31 +227,47 @@ def _shared_reference_context(
     prompt: str,
     company: str | None,
     documents: list[str],
-    spec: ProductSpec | None,
 ) -> str:
     doc_blob = ""
     if documents:
         doc_blob = ("\n\n---\n\n".join(documents))[:6000]
 
     parts: list[str] = [
-        "Industrial design concept reference image for a physical product. "
-        "Single object only, no people, no hands, no text overlays, no watermarks. "
-        "High fidelity, realistic materials, clear silhouette.",
-        "MULTI-VIEW CONSISTENCY (mandatory): You are generating one of two reference shots of the SAME physical product. "
-        "The object must be identical in both images: same overall proportions, silhouette, part lines, lid/body relationship, "
-        "materials, surface finish, color palette, labels, logos, openings, and distinctive details. "
-        "Do not introduce, remove, or change features between views. Only the camera viewpoint may differ.",
+        # Lead with the verbatim user prompt so the model anchors on the actual product type.
+        f"PRODUCT TO RENDER (this is the most important instruction): {prompt.strip()}",
+        "Render exactly the kind of product the user described. The product type is fixed by the user's words "
+        "above; do not change it. Apparel, electronics, furniture, tools, toys, footwear, accessories, vehicles, "
+        "sporting goods, packaging, and any other product category are all valid — choose whichever the user "
+        "actually described, and never default to a container/box/tin/bottle/jar shape unless the user asked for one.",
+        "Style: a clean studio reference photo of a single object, centered, on a neutral soft-gray or white "
+        "background, even soft lighting, realistic materials and proportions, clear silhouette. No people, no "
+        "hands, no surrounding props, no captions, no watermarks, no UI overlays. Logos, labels, graphics, and "
+        "text printed on the product itself are allowed and should be included when the description or brand "
+        "context calls for them.",
+        "MULTI-VIEW CONSISTENCY (mandatory): You are generating one of two reference shots of the SAME object. "
+        "It must look identical in both views — same overall proportions, silhouette, parts, materials, surface "
+        "finish, color palette, graphics, and distinctive details. Do not introduce, remove, or change features "
+        "between views; only the camera viewpoint may differ.",
     ]
     if company:
-        parts.append(f"Company/brand: {company}.")
+        parts.append(f"Company / brand: {company}.")
+
     if doc_blob:
-        parts.append(f"Brand docs (excerpts): {doc_blob}.")
-    if spec is not None:
-        parts.append(_design_lock_from_spec(spec))
-        if prompt.strip() and prompt.strip() != (spec.product_name or "").strip():
-            parts.append(f"Additional user emphasis (must still match the spec above): {prompt.strip()}.")
-    else:
-        parts.append(f"Product idea: {prompt.strip()}.")
+        parts.append(
+            "BRAND AND VISUAL CONTEXT (supporting for product type, but strict for identity): The excerpts below come "
+            "from the user's context documents (pasted text or analyzed reference files). They must not change WHAT "
+            "the product is — the user's words above fix the product category and form. Apply the excerpts to "
+            "colors, finishes, materials, graphics, logos, typography, and stylistic treatment ON that product. "
+            "When excerpts include brand guidelines, a visual identity system, a style manual, or bullets prefixed "
+            "with \"MUST:\" (mandatory rules), treat those specifications as exact requirements: match stated color "
+            "values and palette, respect logo variants/clearspace/background rules when shown or described, use "
+            "lettering that matches named typefaces in weight and character, and match the guide's visual tone. "
+            "Do not substitute different corporate colors, unrelated display fonts, or invented logo marks when the "
+            "guide defines these. If an excerpt mentions or depicts a different object type than the user's product "
+            "description, ignore that object type only; still apply any brand rules from that excerpt to the user's "
+            "product. "
+            f"Excerpts:\n{doc_blob}"
+        )
 
     return " ".join(parts)
 
@@ -273,14 +278,16 @@ def generate_reference_images(
     company: str | None,
     documents: list[str],
     output_dir: Path,
-    spec: ProductSpec | None = None,
+    openai_image_model: str | None = None,
+    after_front_saved: Callable[[], None] | None = None,
 ) -> dict[str, Path]:
     """
     Generates reference images under output_dir and returns view name -> path.
 
-    Front view uses text (+ optional spec) via /v1/images/generations. When possible,
-    the three-quarter view is produced with /v1/images/edits from the front PNG
-    (same product, camera-only instruction), not a second full text rollout.
+    Prompts use only the user's product description, optional company line, and
+    context document excerpts (no structured product spec or inferred geometry).
+    Front view uses /v1/images/generations. When possible, the three-quarter view
+    is produced with /v1/images/edits from the front PNG (camera-only instruction).
     """
     if not IMAGE_OPENAI_API_KEY:
         raise ValueError(
@@ -290,20 +297,21 @@ def generate_reference_images(
             "because /v1/images/generations runs on OpenAI only."
         )
 
-    # Front: text + spec. Three-quarter: derived from the front PNG via /images/edits when the model supports it.
+    gen_model = ((openai_image_model or IMAGE_OPENAI_MODEL) or "").strip() or IMAGE_OPENAI_MODEL
+
+    # Front: user text + context. Three-quarter: derived from the front PNG via /images/edits when supported.
     shared = _shared_reference_context(
         prompt=prompt,
         company=company,
         documents=documents,
-        spec=spec,
     )
     front_camera = (
-        "View role: canonical front orthographic packshot. "
-        "Camera: straight-on front elevation, object centered, eye level, neutral studio background, even soft lighting."
+        "View role: canonical straight-on front reference photo of the product. "
+        "Camera: front elevation, object centered, eye level, neutral studio background, even soft lighting."
     )
     legacy_three_quarter_camera = (
-        "View role: same product as the front reference, rotated in space only. "
-        "Camera: three-quarter view from front-right with a modest downward tilt (not a different product variant). "
+        "View role: same product as the front reference, rotated in space only — not a different product variant. "
+        "Camera: three-quarter view from front-right with a modest downward tilt. "
         "Object centered, neutral studio background, same apparent scale and design as the front view."
     )
 
@@ -315,15 +323,15 @@ def generate_reference_images(
 
     results: dict[str, Path] = {}
 
-    logger.info("reference_image_begin view=front model=%s", IMAGE_OPENAI_MODEL)
+    logger.info("reference_image_begin view=front model=%s", gen_model)
     front_prompt = f"{shared} {front_camera}"
     gen_payload: dict = {
-        "model": IMAGE_OPENAI_MODEL,
+        "model": gen_model,
         "prompt": front_prompt,
         "size": "1024x1024",
         "n": 1,
     }
-    if _dalle_model_requests_response_format(IMAGE_OPENAI_MODEL):
+    if _dalle_model_requests_response_format(gen_model):
         gen_payload["response_format"] = "b64_json"
     body = _post_openai_images_json(
         url=gen_url,
@@ -340,8 +348,10 @@ def generate_reference_images(
     front_path = output_dir / "reference_front.png"
     front_path.write_bytes(front_bytes)
     results["front"] = front_path
+    if after_front_saved is not None:
+        after_front_saved()
 
-    edit_model = _three_quarter_edit_model()
+    edit_model = _three_quarter_edit_model(gen_model)
     if edit_model:
         logger.info(
             "reference_image_begin view=three_quarter model=%s mode=image_edits_from_front",
@@ -350,14 +360,15 @@ def generate_reference_images(
         edit_payload: dict = {
             "model": edit_model,
             "images": [{"image_url": _png_data_url(front_bytes)}],
-            "prompt": _THREE_QUARTER_FROM_FRONT_PROMPT,
-            "input_fidelity": "high",
+            "prompt": _three_quarter_edit_prompt(shared),
             "n": 1,
             "size": "1024x1024",
             "output_format": "png",
             "quality": "high",
             "background": "opaque",
         }
+        if _edit_model_accepts_high_input_fidelity(edit_model):
+            edit_payload["input_fidelity"] = "high"
         body_tq = _post_openai_images_json(
             url=edits_url,
             payload=edit_payload,
@@ -378,16 +389,16 @@ def generate_reference_images(
             "reference_image_three_quarter_fallback primary_model=%s "
             "reason=no_gpt_image_edit_model_for_three_quarter_using_second_text_generation "
             "(set IMAGE_OPENAI_EDIT_MODEL to a GPT image model, e.g. gpt-image-1-mini, to anchor 3/4 on the front PNG)",
-            IMAGE_OPENAI_MODEL,
+            gen_model,
         )
         tq_prompt = f"{shared} {legacy_three_quarter_camera}"
         gen_tq: dict = {
-            "model": IMAGE_OPENAI_MODEL,
+            "model": gen_model,
             "prompt": tq_prompt,
             "size": "1024x1024",
             "n": 1,
         }
-        if _dalle_model_requests_response_format(IMAGE_OPENAI_MODEL):
+        if _dalle_model_requests_response_format(gen_model):
             gen_tq["response_format"] = "b64_json"
         body_tq = _post_openai_images_json(
             url=gen_url,

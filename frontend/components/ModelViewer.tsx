@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { outputUrl } from "@/lib/api";
 
 type ModelViewerProps = {
@@ -9,6 +11,8 @@ type ModelViewerProps = {
   waitingForMesh?: boolean;
   emptyTitle?: string;
   emptySubtitle?: string;
+  /** Shown below the viewer (e.g. regenerate 3D). */
+  footer?: ReactNode;
 };
 
 export function ModelViewer({
@@ -17,6 +21,7 @@ export function ModelViewer({
   waitingForMesh,
   emptyTitle = "3D preview",
   emptySubtitle = "Your interactive model appears here after Meshy finishes. Drag to orbit, scroll to zoom.",
+  footer,
 }: ModelViewerProps) {
   const glbUrl = outputUrl(glbPath);
   const previewUrl = outputUrl(previewPath);
@@ -42,6 +47,7 @@ export function ModelViewer({
             <img className="previewStrip__img" src={previewUrl} alt="Render thumbnail" width={160} height={160} />
           </div>
         ) : null}
+        {footer}
       </div>
     );
   }
@@ -59,7 +65,7 @@ export function ModelViewer({
   }
 
   return (
-    <div className="stagePanel stagePanel--empty">
+    <div className={`stagePanel stagePanel--empty${footer ? " stagePanel--emptyWithFooter" : ""}`}>
       <div className="stageEmpty">
         <div className="stageEmpty__icon" aria-hidden>
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -76,6 +82,7 @@ export function ModelViewer({
         <h3 className="stageEmpty__title">{emptyTitle}</h3>
         <p className="stageEmpty__text">{emptySubtitle}</p>
       </div>
+      {footer}
     </div>
   );
 }

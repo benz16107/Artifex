@@ -14,7 +14,11 @@ from app.config import (
     IMAGE_OPENAI_MODEL,
     IMAGE_OPENAI_MODEL_FAST,
     JOB_METADATA_FILENAME,
+    OPENAI_API_KEY,
     OUTPUTS_DIR,
+    PINGRAM_API_KEY,
+    PINGRAM_BASE_URL,
+    PINGRAM_NOTIFICATION_TYPE,
     QUEUE_BACKEND,
     STORAGE_BACKEND,
 )
@@ -34,7 +38,9 @@ from app.schemas.api import (
     GenerateRequest,
     GenerateResponse,
     JobResponse,
+    ManufacturingBriefRequest,
     SelectConceptStyleRequest,
+    SupplierContactRequest,
 )
 from app.services.concept_review import (
     build_concept_review_snapshot,
@@ -51,6 +57,8 @@ from app.services.jobs import (
     request_cancel,
     update_job,
 )
+from app.services.manufacturing_brief import build_manufacturing_plan
+from app.services.pingram_supplier import pingram_readiness, send_supplier_email
 from app.services.reference_images import build_reference_image_prompt_preview
 
 
@@ -176,10 +184,12 @@ def ready(request: HttpRequest) -> JsonResponse:
     storage_ok, storage_message = storage.readiness()
     overall = queue_ok and storage_ok
     composio_ok, composio_message = composio_context.composio_readiness()
+    pingram_ok, pingram_message = pingram_readiness(PINGRAM_API_KEY, PINGRAM_BASE_URL)
     checks: dict[str, dict[str, str | bool]] = {
         "queue": {"ok": queue_ok, "message": queue_message},
         "storage": {"ok": storage_ok, "message": storage_message},
         "composio": {"ok": composio_ok, "message": composio_message},
+        "pingram_supplier": {"ok": pingram_ok, "message": pingram_message},
     }
     return JsonResponse(
         {
@@ -596,6 +606,110 @@ def get_job(request: HttpRequest, job_id: str) -> JsonResponse:
         return _json_error("Forbidden: job owned by another user", 403)
     data = JobResponse.model_validate(job).model_dump(mode="json")
     return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def manufacturing_brief(request: HttpRequest, job_id: str) -> JsonResponse:
+    """Generate (or return cached) manufacturing / BOM / cost guidance for a completed run."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    if not is_safe_job_id(job_id):
+        return _json_error("Invalid job id.", 400)
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "completed":
+        return _json_error("Manufacturing brief is available when the run has completed successfully.", 409)
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        payload = ManufacturingBriefRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+
+    existing = job.get("manufacturing_plan")
+    key_ok = bool(OPENAI_API_KEY)
+    stale_missing_key_stub = (
+        bool(existing and isinstance(existing, dict))
+        and not payload.refresh
+        and bool((existing or {}).get("stub"))
+        and str((existing or {}).get("stub_reason") or "") == "missing_openai_key"
+        and key_ok
+    )
+    if existing and isinstance(existing, dict) and not payload.refresh and not stale_missing_key_stub:
+        refreshed = read_job(job_id) or job
+        data = JobResponse.model_validate(refreshed).model_dump(mode="json")
+        return JsonResponse(data, safe=False)
+
+    company_ctx = (payload.company_context or "").strip()
+    plan = build_manufacturing_plan(job, company_context=company_ctx)
+    update_job(job_id, {"manufacturing_plan": plan})
+    refreshed = read_job(job_id) or job
+    data = JobResponse.model_validate(refreshed).model_dump(mode="json")
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def supplier_contact(request: HttpRequest, job_id: str) -> JsonResponse:
+    """Send a supplier outreach email via Pingram (email channel; API key on server)."""
+    auth = _authenticate_or_response(request)
+    if isinstance(auth, JsonResponse):
+        return auth
+    if not is_safe_job_id(job_id):
+        return _json_error("Invalid job id.", 400)
+    job = read_job(job_id)
+    if not job:
+        return _json_error("Job not found.", 404)
+    try:
+        _authorize_job_access(job, auth)
+    except PermissionError:
+        return _json_error("Forbidden: job owned by another user", 403)
+    if job.get("status") != "completed":
+        return _json_error("Supplier email is available when the run has completed successfully.", 409)
+    if not PINGRAM_API_KEY:
+        return _json_error(
+            "Pingram is not configured on this server. Set PINGRAM_API_KEY in the API environment "
+            "(see .env.example).",
+            503,
+        )
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return _json_error("Invalid JSON body", 400)
+    try:
+        payload = SupplierContactRequest.model_validate(body)
+    except ValidationError as e:
+        return JsonResponse({"detail": e.errors()}, status=422)
+
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    product_name = spec.get("product_name") if isinstance(spec, dict) else None
+    company = job.get("company") if isinstance(job.get("company"), str) else None
+    try:
+        result = send_supplier_email(
+            api_key=PINGRAM_API_KEY,
+            base_url=PINGRAM_BASE_URL,
+            notification_type=PINGRAM_NOTIFICATION_TYPE,
+            job_id=job_id,
+            to_email=payload.to_email,
+            subject=payload.subject,
+            message_plain=payload.message,
+            product_name=str(product_name) if product_name is not None else None,
+            company=company,
+        )
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+
+    tracking = result.get("trackingId") if isinstance(result, dict) else None
+    return JsonResponse({"ok": True, "tracking_id": tracking, "detail": "Message sent via Pingram."}, status=200)
 
 
 def delete_job(request: HttpRequest, job_id: str) -> JsonResponse:

@@ -164,6 +164,100 @@ export type ResearchBriefField =
 
 export type ResearchBrief = Partial<Record<ResearchBriefField, string>>;
 
+/** Cached result from POST /jobs/{id}/manufacturing-brief; shape is LLM-defined with these common fields. */
+export type ManufacturingPlan = {
+  /** physical_product | virtual_service | hybrid — drives UI labels for the same JSON shape. */
+  plan_focus?: "physical_product" | "virtual_service" | "hybrid";
+  headline?: string;
+  process_summary?: string;
+  recommended_processes?: Array<{
+    name?: string;
+    rationale?: string;
+    typical_lead_time_weeks?: string;
+  }>;
+  bill_of_materials?: Array<{
+    component?: string;
+    function?: string;
+    material_or_process?: string;
+    sourcing_notes?: string;
+  }>;
+  cost_snapshot?: {
+    tooling_usd_band?: string;
+    unit_cost_usd_band?: string;
+    moq_comment?: string;
+    disclaimer?: string;
+  };
+  risks?: string[];
+  supplier_playbook?: Array<{
+    venue?: string;
+    geography?: string;
+    how_to_reach?: string;
+    checklist?: string;
+  }>;
+  visual_cues?: string[];
+  stub?: boolean;
+  stub_reason?: string;
+  stub_detail?: string;
+  company_context_used?: boolean;
+};
+
+/**
+ * Client-side hint for empty-state copy; kept aligned with backend
+ * `manufacturing_brief._stub_plan_focus_from_prompt` (conservative, explicit software signals).
+ */
+export function inferPlanFocusFromPrompt(prompt: string): "physical_product" | "virtual_service" | "hybrid" {
+  const p = prompt.toLowerCase();
+  const strongDigitalPhrases = [
+    "saas",
+    "software as a service",
+    "software-only",
+    "software only",
+    "b2b software",
+    "web application",
+    "web app",
+    "webapp",
+    "mobile application",
+    "mobile app",
+    "iphone app",
+    "android app",
+    "ios app",
+    "desktop application",
+    "desktop app",
+    "progressive web app",
+  ] as const;
+  const strongDigital =
+    strongDigitalPhrases.some((s) => p.includes(s)) || /\bsoftware\b/.test(p);
+  const physical = [
+    "packaging",
+    "bottle",
+    " tin",
+    "tin ",
+    " jar",
+    "box ",
+    "carton",
+    "clamshell",
+    "device",
+    "hardware",
+    "tool",
+    "furniture",
+    "wearable",
+    "printed",
+    "manufactur",
+    "factory",
+    "mold",
+    "injection",
+    "mesh",
+    "glb",
+    "stl",
+    "prototype",
+    "sku",
+    "cpg",
+  ].some((w) => p.includes(w));
+  if (strongDigital && physical) return "hybrid";
+  if (strongDigital) return "virtual_service";
+  return "physical_product";
+}
+
 export type JobPayload = {
   job_id: string;
   user_id?: string;
@@ -211,6 +305,7 @@ export type JobPayload = {
   backboard_thread_id?: string | null;
   backboard_assistant_id?: string | null;
   image_generation_preview?: ImageGenerationPreview | null;
+  manufacturing_plan?: ManufacturingPlan | null;
 };
 
 /** Empty string would make fetch hit the Next origin (`/jobs/...`) and break API calls. Trailing slashes are stripped so paths join as `/jobs/...`. */
@@ -287,6 +382,77 @@ export async function getJob(jobId: string): Promise<JobPayload> {
     throw new Error(`Could not fetch job ${jobId}`);
   }
   return response.json();
+}
+
+/** Build or return cached manufacturing / BOM / cost overview (completed jobs only). */
+export async function requestManufacturingBrief(
+  jobId: string,
+  options?: { companyContext?: string; refresh?: boolean },
+): Promise<JobPayload> {
+  const response = await fetch(`${API_URL_ROOT}/jobs/${jobId}/manufacturing-brief`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    signal: fetchTimeoutSignal(),
+    body: JSON.stringify({
+      company_context: options?.companyContext?.trim() || undefined,
+      refresh: Boolean(options?.refresh),
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Manufacturing brief failed (${response.status}): ${detail}`);
+  }
+  return response.json() as Promise<JobPayload>;
+}
+
+export type SupplierContactPayload = {
+  toEmail: string;
+  subject: string;
+  message: string;
+};
+
+export type SupplierContactResult = {
+  ok: boolean;
+  tracking_id?: string | null;
+  detail?: string;
+};
+
+/** Send supplier outreach email via Pingram (server-side API key; completed jobs only). */
+export async function sendSupplierContact(
+  jobId: string,
+  payload: SupplierContactPayload,
+): Promise<SupplierContactResult> {
+  const SEND_TIMEOUT_MS = 60_000;
+  const signal =
+    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(SEND_TIMEOUT_MS)
+      : fetchTimeoutSignal();
+  const response = await fetch(`${API_URL_ROOT}/jobs/${jobId}/supplier-contact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    signal,
+    body: JSON.stringify({
+      to_email: payload.toEmail.trim(),
+      subject: payload.subject.trim(),
+      message: payload.message.trim(),
+    }),
+  });
+  const text = await response.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = {};
+  }
+  if (!response.ok) {
+    const detail = typeof parsed.detail === "string" ? parsed.detail : text || response.statusText;
+    throw new Error(`Supplier email failed (${response.status}): ${detail}`);
+  }
+  return {
+    ok: Boolean(parsed.ok),
+    tracking_id: typeof parsed.tracking_id === "string" ? parsed.tracking_id : null,
+    detail: typeof parsed.detail === "string" ? parsed.detail : undefined,
+  };
 }
 
 /** Recent jobs from the server (newest first). Used to repopulate the gallery when localStorage is empty. */

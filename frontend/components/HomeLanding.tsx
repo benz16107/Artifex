@@ -109,8 +109,9 @@ export function HomeLanding({
       <header className="homeLanding__hero">
         <h1 className="homeLanding__title">What are you building?</h1>
         <p className="homeLanding__tagline">
-          Describe your product idea. We generate concept art, then a 3D mesh you can preview and export—same flow as
-          before, starting from here.
+          Describe your product idea. We generate concept art, then a 3D mesh you can preview and export, then a
+          company-aware production outlook (BOM-style parts, cost bands, supplier next steps)—same flow as before,
+          starting from here.
         </p>
       </header>
 

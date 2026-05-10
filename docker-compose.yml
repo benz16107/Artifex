@@ -28,9 +28,6 @@ services:
       - QUEUE_BACKEND=rq
       - REDIS_URL=redis://redis:6379/0
       - OUTPUTS_DIR=/app/outputs
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_BASE_URL=https://api.deepseek.com
-      - OPENAI_MODEL=deepseek-chat
     volumes:
       - ./outputs:/app/outputs
     depends_on:

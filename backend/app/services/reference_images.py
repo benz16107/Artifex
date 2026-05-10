@@ -73,7 +73,8 @@ def _png_data_url(image_bytes: bytes) -> str:
 
 
 _THREE_QUARTER_CAMERA_DIRECTIVE = (
-    "The input image is the canonical straight-on front view of one physical product and is the "
+    "The input image is the canonical straight-on front view of one physical product or one studio "
+    "hero object (including a device mockup or branded prop standing in for a digital service) and is the "
     "primary visual reference for geometry, proportions, silhouette, materials, colors, labels, "
     "logos, and surface finish. Produce a new studio photograph of the exact same object from a "
     "three-quarter angle (front-right), with a modest downward tilt, centered, neutral soft-gray "
@@ -257,6 +258,12 @@ def _shared_reference_context(
         "above; do not change it. Apparel, electronics, furniture, tools, toys, footwear, accessories, vehicles, "
         "sporting goods, packaging, and any other product category are all valid — choose whichever the user "
         "actually described, and never default to a container/box/tin/bottle/jar shape unless the user asked for one.",
+        "VIRTUAL OR SOFTWARE-ONLY OFFERINGS: When the user describes a service, app, SaaS, marketplace, or other "
+        "primarily digital product, still output exactly one studio object suitable for a desktop web 3D preview "
+        "(clear silhouette, reads at moderate viewer size): e.g. a laptop or phone showing a simplified UI frame, "
+        "a branded card or token, a headset for a support offering, or another single hero prop that credibly "
+        "symbolizes the service. Do not output a disembodied full-screen UI with no device; anchor any screen content "
+        "in a tangible frame.",
         "Style: a clean studio reference photo of a single object, centered, on a neutral soft-gray or white "
         "background, even soft lighting, realistic materials and proportions, clear silhouette. No people, no "
         "hands, no surrounding props, no captions, no watermarks, no UI overlays. Logos, labels, graphics, and "

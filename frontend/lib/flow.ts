@@ -7,7 +7,7 @@ export function isTerminalJobStatus(status: JobStatus): boolean {
 
 export function getFlowStep(job: JobPayload | null): FlowStepId {
   if (!job) return "references";
-  if (job.status === "completed") return "export";
+  if (job.status === "completed") return "production";
   if (job.status === "failed" || job.status === "cancelled") {
     if (job.files?.glb) return "export";
     const gp = (job.generation_phase ?? "").toLowerCase();

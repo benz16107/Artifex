@@ -23,7 +23,8 @@ MANIFEST_FILENAME = "manifest.json"
 GENERATION_TIMEOUT_SECONDS = int(os.getenv("GENERATION_TIMEOUT_SECONDS", "45"))
 GENERATION_MAX_RETRIES = int(os.getenv("GENERATION_MAX_RETRIES", "1"))
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Strip so whitespace-only values do not look "set" to the app while failing auth at the provider.
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
 OPENAI_MODEL_RAW = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
 # OpenAI's Chat Completions API only accepts OpenAI deployment/model ids; DeepSeek ids → 404.
@@ -179,6 +180,11 @@ def _parse_composio_allowed_toolkits(raw: str) -> list[str]:
 
 
 COMPOSIO_ALLOWED_TOOLKITS = _parse_composio_allowed_toolkits(COMPOSIO_ALLOWED_TOOLKITS_RAW)
+
+# Optional Pingram (https://www.pingram.io/) — supplier outreach email from the manufacturing tab.
+PINGRAM_API_KEY = (os.getenv("PINGRAM_API_KEY") or "").strip() or None
+PINGRAM_BASE_URL = (os.getenv("PINGRAM_BASE_URL") or "https://api.pingram.io").rstrip("/")
+PINGRAM_NOTIFICATION_TYPE = (os.getenv("PINGRAM_NOTIFICATION_TYPE") or "artifex_supplier_inquiry").strip() or "artifex_supplier_inquiry"
 
 
 def composio_oauth_callback_prefixes() -> list[str]:

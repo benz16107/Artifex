@@ -26,6 +26,8 @@ urlpatterns = [
     path("jobs/<str:job_id>/add-concept-style", views_api.add_concept_style),
     path("jobs/<str:job_id>/select-concept-style", views_api.select_concept_style),
     path("jobs/<str:job_id>/regenerate-3d", views_api.regenerate_mesh),
+    path("jobs/<str:job_id>/manufacturing-brief", views_api.manufacturing_brief),
+    path("jobs/<str:job_id>/supplier-contact", views_api.supplier_contact),
     path("jobs/<str:job_id>/cancel", views_api.cancel_job),
     re_path(
         r"^outputs/(?P<path>.*)$",

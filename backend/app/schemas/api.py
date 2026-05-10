@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.schemas.spec import ProductSpec
+from app.services.pingram_supplier import validate_supplier_email
 from app.services.meshy import normalize_meshy_target_formats
 
 
@@ -72,6 +73,30 @@ class ConfirmImageGenerationRequest(BaseModel):
 
     research_digest: str | None = Field(default=None, max_length=8000)
     research_brief: ResearchBriefPayload | None = Field(default=None)
+
+
+class ManufacturingBriefRequest(BaseModel):
+    """Optional extra company context from the workspace (not persisted on the job)."""
+
+    company_context: str | None = Field(default=None, max_length=12000)
+    refresh: bool = False
+
+
+class SupplierContactRequest(BaseModel):
+    """Email a supplier via Pingram from a completed Artifex run (server holds PINGRAM_API_KEY)."""
+
+    to_email: str = Field(min_length=3, max_length=254)
+    subject: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1, max_length=16_000)
+
+    @field_validator("to_email")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        s = (value or "").strip().lower()
+        ok = validate_supplier_email(s)
+        if not ok:
+            raise ValueError("Invalid supplier email address.")
+        return ok
 
 
 class ConfirmConceptRequest(BaseModel):
@@ -147,6 +172,8 @@ class JobResponse(BaseModel):
     research_brief: dict[str, str] | None = None
     research_warnings: list[str] = Field(default_factory=list)
     image_generation_preview: dict[str, Any] | None = None
+    # Populated after POST /jobs/{id}/manufacturing-brief (cached on the job).
+    manufacturing_plan: dict[str, Any] | None = None
 
 
 class GenerateResponse(BaseModel):

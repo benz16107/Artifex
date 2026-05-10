@@ -1,6 +1,6 @@
 "use client";
 
-export type FlowStepId = "references" | "mesh" | "export";
+export type FlowStepId = "references" | "mesh" | "export" | "production" | "supplier";
 
 type StepDef = { id: FlowStepId; label: string; short: string };
 
@@ -8,6 +8,8 @@ const STEPS: StepDef[] = [
   { id: "references", label: "Concept art", short: "1" },
   { id: "mesh", label: "3D build", short: "2" },
   { id: "export", label: "Export", short: "3" },
+  { id: "production", label: "Production", short: "4" },
+  { id: "supplier", label: "Suppliers", short: "5" },
 ];
 
 type FlowStepperProps = {

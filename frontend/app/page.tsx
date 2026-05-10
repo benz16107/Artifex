@@ -12,6 +12,8 @@ import { DeletePrototypeIcon } from "@/components/PortfolioSection";
 import { ModelViewAngleExport } from "@/components/ModelViewAngleExport";
 import { ModelViewer } from "@/components/ModelViewer";
 import { PipelineConceptRefs } from "@/components/PipelineConceptRefs";
+import { ProductionPlanStage } from "@/components/ProductionPlanStage";
+import { SupplierContactStage } from "@/components/SupplierContactStage";
 import type { ReferenceFilesHandle } from "@/components/ReferenceFilesBlock";
 import {
   friendlyGenerationPhase,
@@ -55,7 +57,7 @@ const POLL_MS = 1200;
 /** Keep enough history to surface a user's full recent gallery; bumped to align with the server-side recovery cap. */
 const MAX_HISTORY = 60;
 
-const FLOW_STEP_ORDER: FlowStepId[] = ["references", "mesh", "export"];
+const FLOW_STEP_ORDER: FlowStepId[] = ["references", "mesh", "export", "production", "supplier"];
 
 const MESHY_FORMAT_OPTIONS: { id: string; label: string; hint?: string }[] = [
   { id: "glb", label: "GLB", hint: "Live preview" },
@@ -157,6 +159,18 @@ export default function HomePage() {
   }, [job, job?.job_id, job?.status]);
 
   const displayedFlowStep = useMemo(() => retroStep ?? getFlowStep(job), [retroStep, job]);
+  /** GLB/PNG/spec downloads, multi-angle ZIP, and re-run Meshy belong on Export (and pre-complete pipeline), not Production/Supplier. */
+  const exportRailRetroOk = !retroStep || retroStep === "export";
+  const showExportArtifactsInRail = useMemo(
+    () =>
+      Boolean(
+        job &&
+          displayedFlowStep !== "production" &&
+          displayedFlowStep !== "supplier" &&
+          (!isTerminalJobStatus(job.status) || displayedFlowStep === "export"),
+      ),
+    [job, displayedFlowStep],
+  );
   const anyPipelineBusy =
     Boolean(job && !isTerminalJobStatus(job.status)) ||
     sidecarJobs.some((j) => !isTerminalJobStatus(j.status));
@@ -828,7 +842,8 @@ export default function HomePage() {
   const isFlowStepLocked = useCallback(
     (step: FlowStepId) => {
       if (!job) return true;
-      if (isTerminalJobStatus(job.status)) return false;
+      if (job.status === "completed") return false;
+      if (isTerminalJobStatus(job.status)) return step === "production" || step === "supplier";
       return FLOW_STEP_ORDER.indexOf(step) > FLOW_STEP_ORDER.indexOf(liveFlowStep);
     },
     [job, liveFlowStep],
@@ -839,13 +854,13 @@ export default function HomePage() {
       if (!job || loading) return;
       if (isFlowStepLocked(step)) return;
       if (isTerminalJobStatus(job.status)) {
-        setRetroStep(step === "export" ? null : step);
+        setRetroStep(step === "production" ? null : step);
         return;
       }
       const liveIdx = FLOW_STEP_ORDER.indexOf(liveFlowStep);
       const targetIdx = FLOW_STEP_ORDER.indexOf(step);
       if (targetIdx < liveIdx) {
-        setRetroStep(step === "export" ? null : step);
+        setRetroStep(step === "production" ? null : step);
       } else if (targetIdx === liveIdx) {
         setRetroStep(null);
       }
@@ -912,7 +927,7 @@ export default function HomePage() {
   const canRegenerate3d = Boolean(
     job && (job.status === "completed" || job.status === "failed"),
   );
-  const canRegenerate3dInteractive = canRegenerate3d && !retroStep;
+  const canRegenerate3dInteractive = canRegenerate3d && showExportArtifactsInRail && exportRailRetroOk;
 
   /** Finished runs: show chrome above Company settings or above the Home pipeline so users can leave or delete. */
   const showTerminalJobShellHeader =
@@ -1048,7 +1063,7 @@ export default function HomePage() {
             </section>
           ) : null}
 
-          {!retroStep && downloads.length > 0 ? (
+          {showExportArtifactsInRail && exportRailRetroOk && downloads.length > 0 ? (
             <section className="panel panel--downloads">
               <h3 className="panel__h">Downloads</h3>
               <div className="downloadChips">
@@ -1061,7 +1076,7 @@ export default function HomePage() {
             </section>
           ) : null}
 
-          {!retroStep && job?.files?.glb ? (
+          {showExportArtifactsInRail && exportRailRetroOk && job?.files?.glb ? (
             <section className="panel panel--downloads">
               <h3 className="panel__h">Image views</h3>
               <ModelViewAngleExport glbPath={job.files.glb} jobId={job.job_id} />
@@ -1382,6 +1397,14 @@ export default function HomePage() {
               <PipelineConceptRefs conceptReferences={job?.concept_references} />
               <ModelViewer waitingForMesh />
             </div>
+          ) : job?.status === "completed" && displayedFlowStep === "production" ? (
+            <ProductionPlanStage
+              job={job}
+              companyContextText={companyContextText}
+              onJobUpdated={(next) => setJob((prev) => mergeJobPoll(prev, next, next.job_id))}
+            />
+          ) : job?.status === "completed" && displayedFlowStep === "supplier" ? (
+            <SupplierContactStage job={job} />
           ) : (
             <div className="stageWithConceptRefs">
               <PipelineConceptRefs conceptReferences={job?.concept_references} />

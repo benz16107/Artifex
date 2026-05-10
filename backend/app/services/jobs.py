@@ -80,6 +80,7 @@ def create_job(
         "image_generation_preview": None,
         "backboard_thread_id": None,
         "backboard_assistant_id": None,
+        "manufacturing_plan": None,
     }
     _write(path / JOB_METADATA_FILENAME, data)
     return data

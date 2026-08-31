@@ -29,3 +29,5 @@ quest-viewer/MemoryCaptures/
 quest-viewer/[Bb]uild/
 quest-viewer/[Ll]ibrary/
 quest-viewer/[Tt]emp/
+.utmp/
+*_BurstDebugInformation_DoNotShip/
